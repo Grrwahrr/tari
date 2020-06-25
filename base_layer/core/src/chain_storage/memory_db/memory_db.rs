@@ -42,7 +42,7 @@ use crate::{
     },
     proof_of_work::{Difficulty, PowAlgorithm},
     transactions::{
-        transaction::{TransactionKernel, TransactionOutput},
+        transaction::{TransactionInput, TransactionKernel, TransactionOutput},
         types::HashOutput,
     },
 };
@@ -114,6 +114,80 @@ where D: Digest + Send + Sync
         Self {
             db: Arc::new(RwLock::new(InnerDatabase::new(mmr_cache_config))),
         }
+    }
+
+    // This will reconstruct the blocks and returns a copy
+    fn reconstruct_block(&self, height: u64) -> Result<Block, ChainStorageError> {
+        let mut db = self
+            .db
+            .read()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        // get header
+        let header: BlockHeader = db
+            .headers
+            .get(&height)
+            .ok_or_else(|| ChainStorageError::ValueNotFound(DbKey::BlockHeader(height)))?
+            .clone();
+        // get the checkpoint
+        let kernel_cp = self.fetch_checkpoint(MmrTree::Kernel, height)?;
+        let (kernel_hashes, _) = kernel_cp.into_parts();
+        let mut kernels = Vec::new();
+        // get kernels
+        for hash in kernel_hashes {
+            let kernel: TransactionKernel = db
+                .kernels
+                .get(&hash)
+                .ok_or_else(|| ChainStorageError::ValueNotFound(DbKey::TransactionKernel(hash)))?
+                .clone();
+            kernels.push(kernel);
+        }
+        let utxo_cp = self.fetch_checkpoint(MmrTree::Utxo, height)?;
+        let (utxo_hashes, deleted_nodes) = utxo_cp.into_parts();
+        // lets get the inputs
+        let inputs: Result<Vec<TransactionInput>, ChainStorageError> = deleted_nodes
+            .iter()
+            .map(|pos| {
+                self.fetch_mmr_nodes(MmrTree::Utxo, pos, 1).and_then(|node| {
+                    let (hash, deleted) = node[0];
+                    assert!(deleted);
+                    let val: TransactionOutput = db
+                        .stxos
+                        .get(&hash)
+                        .ok_or_else(|| ChainStorageError::ValueNotFound(DbKey::SpentOutput(hash)))?
+                        .value
+                        .clone();
+                    Ok(TransactionInput::from(val))
+                })
+            })
+            .collect();
+        let inputs = inputs?;
+        // lets get the outputs
+        let mut outputs = Vec::with_capacity(utxo_hashes.len());
+        let mut spent = Vec::with_capacity(utxo_hashes.len());
+        for hash in utxo_hashes.into_iter() {
+            // The outputs could come from either the UTXO or STXO set
+            let val: Option<&MerkleNode<TransactionOutput>> = db.utxos.get(&hash);
+            if val.is_some() {
+                outputs.push(val.unwrap().value.clone());
+                continue;
+            }
+            // Check the STXO set
+            let val: Option<&MerkleNode<TransactionOutput>> = db.stxos.get(&hash);
+            match val {
+                Some(v) => {
+                    spent.push(v.value.commitment.clone());
+                    outputs.push(v.value.clone());
+                },
+                None => return Err(ChainStorageError::ValueNotFound(DbKey::SpentOutput(hash))),
+            }
+        }
+        let block = header
+            .into_builder()
+            .add_inputs(inputs)
+            .add_outputs(outputs)
+            .add_kernels(kernels)
+            .build();
+        Ok(block)
     }
 
     fn fetch_mmr_node(&self, tree: MmrTree, pos: u32) -> Result<(Vec<u8>, bool), ChainStorageError> {
@@ -314,6 +388,18 @@ where D: Digest + Send + Sync
         }
         Ok(())
     }
+
+    fn fetch_checkpoint(&self, tree: MmrTree, height: u64) -> Result<MerkleCheckPoint, ChainStorageError> {
+        let db = self.db_access()?;
+        let tip_height = db.headers.len().saturating_sub(1) as u64;
+        let pruned_mode = self.fetch_metadata()?.is_pruned_node();
+        match tree {
+            MmrTree::Kernel => fetch_checkpoint(&db.kernel_checkpoints, pruned_mode, tip_height, height),
+            MmrTree::Utxo => fetch_checkpoint(&db.utxo_checkpoints, pruned_mode, tip_height, height),
+            MmrTree::RangeProof => fetch_checkpoint(&db.range_proof_checkpoints, pruned_mode, tip_height, height),
+        }?
+        .ok_or_else(|| ChainStorageError::OutOfRange)
+    }
 }
 
 impl<D> BlockchainBackend for MemoryDatabase<D>
@@ -509,6 +595,10 @@ where D: Digest + Send + Sync
                 .get(k)
                 .map(|v| DbValue::TransactionKernel(Box::new(v.clone()))),
             DbKey::OrphanBlock(k) => db.orphans.get(k).map(|v| DbValue::OrphanBlock(Box::new(v.clone()))),
+            DbKey::Block(k) => {
+                let block = self.reconstruct_block(*k)?;
+                Some(DbValue::OrphanBlock(Box::new(block)))
+            },
         };
         Ok(result)
     }

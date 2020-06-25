@@ -220,29 +220,7 @@ where D: Digest + Send + Sync
     fn commit_mmrs(&mut self, tx: DbTransaction) -> Result<(), ChainStorageError> {
         for op in tx.operations.into_iter() {
             match op {
-                WriteOperation::RewindMmr(tree, steps_back) => match tree {
-                    MmrTree::Kernel => {
-                        let last_cp = rewind_checkpoints(&mut self.kernel_checkpoints, steps_back)?;
-                        self.kernel_mmr
-                            .update()
-                            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
-                        self.curr_kernel_checkpoint.reset_to(&last_cp);
-                    },
-                    MmrTree::Utxo => {
-                        let last_cp = rewind_checkpoints(&mut self.utxo_checkpoints, steps_back)?;
-                        self.utxo_mmr
-                            .update()
-                            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
-                        self.curr_utxo_checkpoint.reset_to(&last_cp);
-                    },
-                    MmrTree::RangeProof => {
-                        let last_cp = rewind_checkpoints(&mut self.range_proof_checkpoints, steps_back)?;
-                        self.range_proof_mmr
-                            .update()
-                            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
-                        self.curr_range_proof_checkpoint.reset_to(&last_cp);
-                    },
-                },
+                WriteOperation::RewindMmr(tree, steps_back) => match tree {},
                 WriteOperation::CreateMmrCheckpoint(tree) => match tree {
                     MmrTree::Kernel => {
                         let curr_checkpoint = self.curr_kernel_checkpoint.clone();
@@ -385,6 +363,28 @@ where D: Digest + Send + Sync
         Ok(())
     }
 
+    fn rewind_mmrs(&mut self, steps_back: usize) -> Result<(), ChainStorageError> {
+        // rewind kernel
+        let last_cp = rewind_checkpoints(&mut self.kernel_checkpoints, steps_back)?;
+        self.kernel_mmr
+            .update()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        self.curr_kernel_checkpoint.reset_to(&last_cp);
+        // rewind utxo
+        let last_cp = rewind_checkpoints(&mut self.utxo_checkpoints, steps_back)?;
+        self.utxo_mmr
+            .update()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        self.curr_utxo_checkpoint.reset_to(&last_cp);
+        // rewind range proof
+        let last_cp = rewind_checkpoints(&mut self.range_proof_checkpoints, steps_back)?;
+        self.range_proof_mmr
+            .update()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        self.curr_range_proof_checkpoint.reset_to(&last_cp);
+        Ok(())
+    }
+
     fn fetch_mmr_node(&self, tree: MmrTree, pos: u32) -> Result<(Vec<u8>, bool), ChainStorageError> {
         let (hash, deleted) = match tree {
             MmrTree::Kernel => self.kernel_mmr.fetch_mmr_node(pos)?,
@@ -508,30 +508,7 @@ where D: Digest + Send + Sync
                     DbKey::Metadata(_) => {}, // no-op
                 },
                 WriteOperation::Spend(key) => match key {
-                    DbKey::UnspentOutput(hash) => {
-                        let utxo: TransactionOutput = lmdb_get(&self.env, &self.utxos_db, &hash)?.ok_or_else(|| {
-                            error!(
-                                target: LOG_TARGET,
-                                "Could spend UTXO: hash `{}` not found in UTXO db",
-                                hash.to_hex()
-                            );
-                            ChainStorageError::UnspendableInput
-                        })?;
-
-                        let index = lmdb_get(&self.env, &self.txos_hash_to_index_db, &hash)?.ok_or_else(|| {
-                            error!(
-                                target: LOG_TARGET,
-                                "** Blockchain DB out of sync! ** Hash `{}` was found in utxo_db but could not be \
-                                 found in txos_hash_to_index db!",
-                                hash.to_hex()
-                            );
-                            ChainStorageError::UnspendableInput
-                        })?;
-                        self.curr_utxo_checkpoint.push_deletion(index);
-
-                        lmdb_delete(&txn, &self.utxos_db, &hash)?;
-                        lmdb_insert(&txn, &self.stxos_db, &hash, &utxo)?;
-                    },
+                    DbKey::UnspentOutput(hash) => {},
                     _ => return Err(ChainStorageError::InvalidOperation("Only UTXOs can be spent".into())),
                 },
                 WriteOperation::UnSpend(key) => match key {
@@ -675,9 +652,10 @@ where D: Digest + Send + Sync
 
     // rewinds the database to the specified height. It will move every block that was rewound to the orphan pool
     fn rewind_to_height(&mut self, height: u64) -> Result<(Vec<BlockHash>), ChainStorageError> {
-        let hashes = Vec::new();
+        let hashes: Vec<BlockHash> = Vec::new();
         let txn = WriteTransaction::new(self.env.clone()).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
         let chain_height = self.mem_metadata.height_of_longest_chain.unwrap_or(0);
+        let steps_back = (chain_height - height) as usize;
         let mut removed_blocks = Vec::new();
         for rewind_height in ((height + 1)..=chain_height).rev() {
             // Reconstruct block at height and add to orphan block pool
@@ -690,34 +668,62 @@ where D: Digest + Send + Sync
 
             // Now we need to remove that block
             // Remove Header and block hash
-            txn.delete(DbKey::BlockHeader(rewind_height)); // Will also delete the blockhash
-                                                           // Remove Kernels
-            self.fetch_checkpoint(MmrTree::Kernel, rewind_height)?
-                .nodes_added()
-                .iter()
-                .for_each(|hash_output| {
-                    txn.delete(DbKey::TransactionKernel(hash_output.clone()));
-                });
+            lmdb_delete(&txn, &self.block_hashes_db, &hash)?;
+            lmdb_delete(&txn, &self.headers_db, &rewind_height)?;
+
+            // lets get the checkpoint
+            let hashes = self.fetch_checkpoint(MmrTree::Kernel, rewind_height)?.nodes_added();
+            for hash in hashes {
+                lmdb_delete(&txn, &self.kernels_db, hash)?;
+            }
             // Remove UTXOs and move STXOs back to UTXO set
-            let (nodes_added, nodes_deleted) = fetch_checkpoint(&**db, MmrTree::Utxo, rewind_height)?.into_parts();
-            nodes_added.iter().for_each(|hash_output| {
-                txn.delete(DbKey::UnspentOutput(hash_output.clone()));
-            });
+            let (nodes_added, nodes_deleted) = self.fetch_checkpoint(MmrTree::Utxo, rewind_height)?.into_parts();
+            for hash in nodes_added {
+                lmdb_delete(&txn, &self.utxos_db, &hash)?;
+                lmdb_delete(&txn, &self.txos_hash_to_index_db, &hash)?;
+            }
+            // lets unspend utxos
             for pos in nodes_deleted.iter() {
-                db.fetch_mmr_node(MmrTree::Utxo, pos).and_then(|(stxo_hash, deleted)| {
+                self.fetch_mmr_nodes(MmrTree::Utxo, pos, 1).and_then(|nodes| {
+                    let (stxo_hash, deleted) = nodes[0];
                     assert!(deleted);
-                    txn.unspend_stxo(stxo_hash);
+
+                    let utxo: TransactionOutput =
+                        lmdb_get(&self.env, &self.utxos_db, &stxo_hash)?.ok_or_else(|| {
+                            error!(
+                                target: LOG_TARGET,
+                                "Could spend UTXO: hash `{}` not found in UTXO db",
+                                hash.to_hex()
+                            );
+                            ChainStorageError::UnspendableInput
+                        })?;
+
+                    let index = lmdb_get(&self.env, &self.txos_hash_to_index_db, &stxo_hash)?.ok_or_else(|| {
+                        error!(
+                            target: LOG_TARGET,
+                            "** Blockchain DB out of sync! ** Hash `{}` was found in utxo_db but could not be found \
+                             in txos_hash_to_index db!",
+                            hash.to_hex()
+                        );
+                        ChainStorageError::UnspendableInput
+                    })?;
+                    self.curr_utxo_checkpoint.push_deletion(index);
+
+                    lmdb_delete(&txn, &self.utxos_db, &stxo_hash)?;
+                    lmdb_insert(&txn, &self.stxos_db, &stxo_hash, &utxo)?;
                     Ok(())
                 })?;
             }
         }
-        // Rewind MMRs
-        txn.rewind_kernel_mmr(steps_back);
-        txn.rewind_utxo_mmr(steps_back);
-        txn.rewind_rp_mmr(steps_back);
+        self.rewind_mmrs(steps_back)?;
 
-        txn.commit()
-            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        match txn.commit().map_err(|e| ChainStorageError::AccessError(e.to_string())) {
+            Ok(_) => Ok(removed_blocks),
+            Err(e) => {
+                self.reset_mmrs()?;
+                Err(e)
+            },
+        }
     }
 
     /// This is used when synchronising. Adds in the list of headers provided to the main chain
