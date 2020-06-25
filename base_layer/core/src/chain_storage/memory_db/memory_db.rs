@@ -261,6 +261,28 @@ where D: Digest + Send + Sync
         )
     }
 
+    fn rewind_mmrs(db: &mut RwLockWriteGuard<InnerDatabase<D>>, steps_back: usize) -> Result<(), ChainStorageError> {
+        // rewind kernel
+        let last_cp = rewind_checkpoints(&mut db.kernel_checkpoints, steps_back)?;
+        db.kernel_mmr
+            .update()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        db.curr_kernel_checkpoint.reset_to(&last_cp);
+        // rewind utxo
+        let last_cp = rewind_checkpoints(&mut db.utxo_checkpoints, steps_back)?;
+        db.utxo_mmr
+            .update()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        db.curr_utxo_checkpoint.reset_to(&last_cp);
+        // rewind range proof
+        let last_cp = rewind_checkpoints(&mut db.range_proof_checkpoints, steps_back)?;
+        db.range_proof_mmr
+            .update()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        db.curr_range_proof_checkpoint.reset_to(&last_cp);
+        Ok(())
+    }
+
     fn write(&mut self, tx: DbTransaction) -> Result<(), ChainStorageError> {
         if tx.operations.is_empty() {
             return Ok(());
@@ -482,8 +504,52 @@ where D: Digest + Send + Sync
 
     // rewinds the database to the specified height. It will move every block that was rewound to the orphan pool
     fn rewind_to_height(&mut self, height: u64) -> Result<(Vec<BlockHash>), ChainStorageError> {
-        let result = Vec::new();
-        Ok(result)
+        let hashes: Vec<BlockHash> = Vec::new();
+        let mut db = self
+            .db
+            .write()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        let chain_height = self.fetch_chain_height()?.unwrap_or(0);
+        let steps_back = (chain_height - height) as usize;
+        let mut removed_blocks = Vec::new();
+        for rewind_height in ((height + 1)..=chain_height).rev() {
+            // Reconstruct block at height and add to orphan block pool
+
+            let orphaned_block = self.reconstruct_block(rewind_height)?; // fetch_block(&**db, rewind_height)?.block().clone();
+                                                                         // 1st we add the removed block back to the orphan pool.
+            let hash = orphaned_block.hash();
+            db.orphans.insert(hash, orphaned_block);
+            removed_blocks.push(hash);
+
+            // Now we need to remove that block
+            // Remove Header and block hash
+            db.headers
+                .remove(&rewind_height)
+                .and_then(|v| db.block_hashes.remove(&v.hash()));
+
+            // lets get the checkpoint
+            let hashes = self.fetch_checkpoint(MmrTree::Kernel, rewind_height)?.nodes_added();
+            for hash in hashes {
+                db.kernels.remove(hash);
+            }
+            // Remove UTXOs and move STXOs back to UTXO set
+            let (nodes_added, nodes_deleted) = self.fetch_checkpoint(MmrTree::Utxo, rewind_height)?.into_parts();
+            for hash in nodes_added {
+                db.utxos.remove(&hash);
+            }
+            // lets unspend utxos
+            for pos in nodes_deleted.iter() {
+                self.fetch_mmr_nodes(MmrTree::Utxo, pos, 1).and_then(|nodes| {
+                    let (stxo_hash, deleted) = nodes[0];
+                    assert!(deleted);
+
+                    unspend_stxo(&mut db, stxo_hash);
+                    Ok(())
+                })?;
+            }
+        }
+        MemoryDatabase::rewind_mmrs(&mut db, steps_back)?;
+        Ok(hashes)
     }
 
     /// This is used when synchronising. Adds in the list of headers provided to the main chain
