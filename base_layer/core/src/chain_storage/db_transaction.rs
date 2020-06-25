@@ -230,6 +230,7 @@ pub enum MetadataValue {
 pub enum DbKey {
     Metadata(MetadataKey),
     BlockHeader(u64),
+    Block(u64),
     BlockHash(BlockHash),
     UnspentOutput(HashOutput),
     SpentOutput(HashOutput),
@@ -241,6 +242,7 @@ pub enum DbKey {
 pub enum DbValue {
     Metadata(MetadataValue),
     BlockHeader(Box<BlockHeader>),
+    Block(Box<Block>),
     BlockHash(Box<BlockHeader>),
     UnspentOutput(Box<TransactionOutput>),
     SpentOutput(Box<TransactionOutput>),
@@ -256,6 +258,7 @@ impl Display for DbValue {
             DbValue::Metadata(MetadataValue::PruningHorizon(_)) => f.write_str("Pruning horizon"),
             DbValue::Metadata(MetadataValue::BestBlock(_)) => f.write_str("Chain tip block hash"),
             DbValue::BlockHeader(_) => f.write_str("Block header"),
+            DbValue::Block(_) => f.write_str("Block"),
             DbValue::BlockHash(_) => f.write_str("Block hash"),
             DbValue::UnspentOutput(_) => f.write_str("Unspent output"),
             DbValue::SpentOutput(_) => f.write_str("Spent output"),
@@ -273,6 +276,7 @@ impl Display for DbKey {
             DbKey::Metadata(MetadataKey::PruningHorizon) => f.write_str("Pruning horizon"),
             DbKey::Metadata(MetadataKey::BestBlock) => f.write_str("Chain tip block hash"),
             DbKey::BlockHeader(v) => f.write_str(&format!("Block header (#{})", v)),
+            DbKey::Block(v) => f.write_str(&format!("Block (#{})", v)),
             DbKey::BlockHash(v) => f.write_str(&format!("Block hash (#{})", to_hex(v))),
             DbKey::UnspentOutput(v) => f.write_str(&format!("Unspent output ({})", to_hex(v))),
             DbKey::SpentOutput(v) => f.write_str(&format!("Spent output ({})", to_hex(v))),

@@ -116,6 +116,19 @@ where D: Digest + Send + Sync
         }
     }
 
+    fn fetch_mmr_node(&self, tree: MmrTree, pos: u32) -> Result<(Vec<u8>, bool), ChainStorageError> {
+        let db = self.db_access()?;
+        let (hash, deleted) = match tree {
+            MmrTree::Kernel => db.kernel_mmr.fetch_mmr_node(pos)?,
+            MmrTree::Utxo => db.utxo_mmr.fetch_mmr_node(pos)?,
+            MmrTree::RangeProof => db.range_proof_mmr.fetch_mmr_node(pos)?,
+        };
+        let hash = hash.ok_or_else(|| {
+            ChainStorageError::UnexpectedResult(format!("A leaf node hash in the {} MMR tree was not found", tree))
+        })?;
+        Ok((hash, deleted))
+    }
+
     pub(self) fn db_access(&self) -> Result<RwLockReadGuard<InnerDatabase<D>>, ChainStorageError> {
         self.db
             .read()
@@ -173,11 +186,7 @@ where D: Digest + Send + Sync
             },
         )
     }
-}
 
-impl<D> BlockchainBackend for MemoryDatabase<D>
-where D: Digest + Send + Sync
-{
     fn write(&mut self, tx: DbTransaction) -> Result<(), ChainStorageError> {
         if tx.operations.is_empty() {
             return Ok(());
@@ -195,45 +204,6 @@ where D: Digest + Send + Sync
                     DbKeyValuePair::Metadata(k, v) => {
                         let key = k as u32;
                         db.metadata.insert(key, v);
-                    },
-                    DbKeyValuePair::BlockHeader(k, v) => {
-                        if db.headers.contains_key(&k) {
-                            return Err(ChainStorageError::InvalidOperation(format!(
-                                "Duplicate `BlockHeader` key `{}`",
-                                k
-                            )));
-                        }
-                        db.block_hashes.insert(v.hash(), k);
-                        db.headers.insert(k, *v);
-                    },
-                    DbKeyValuePair::UnspentOutput(k, v) => {
-                        if db.utxos.contains_key(&k) {
-                            return Err(ChainStorageError::InvalidOperation(format!(
-                                "Duplicate `UnspentOutput` key `{}`",
-                                k.to_hex()
-                            )));
-                        }
-                        db.curr_utxo_checkpoint.push_addition(k.clone());
-                        db.curr_range_proof_checkpoint.push_addition(v.proof().hash());
-                        let index = db.curr_range_proof_checkpoint.accumulated_nodes_added_count() - 1;
-                        let v = MerkleNode {
-                            index: index as usize,
-                            value: *v,
-                        };
-                        db.utxos.insert(k, v);
-                    },
-                    DbKeyValuePair::TransactionKernel(k, v) => {
-                        if db.kernels.contains_key(&k) {
-                            return Err(ChainStorageError::InvalidOperation(format!(
-                                "Duplicate `TransactionKernel` key `{}`",
-                                k.to_hex()
-                            )));
-                        }
-                        db.curr_kernel_checkpoint.push_addition(k.clone());
-                        db.kernels.insert(k, *v);
-                    },
-                    DbKeyValuePair::OrphanBlock(k, v) => {
-                        db.orphans.insert(k, *v);
                     },
                 },
                 WriteOperation::Delete(delete) => match delete {
@@ -256,15 +226,6 @@ where D: Digest + Send + Sync
                     DbKey::OrphanBlock(k) => {
                         db.orphans.remove(&k);
                     },
-                },
-                WriteOperation::Spend(key) => match key {
-                    DbKey::UnspentOutput(hash) => {
-                        let moved = spend_utxo(&mut db, hash);
-                        if !moved {
-                            return Err(ChainStorageError::UnspendableInput);
-                        }
-                    },
-                    _ => return Err(ChainStorageError::InvalidOperation("Only UTXOs can be spent".into())),
                 },
                 WriteOperation::UnSpend(key) => match key {
                     DbKey::SpentOutput(hash) => {
@@ -353,6 +314,177 @@ where D: Digest + Send + Sync
         }
         Ok(())
     }
+}
+
+impl<D> BlockchainBackend for MemoryDatabase<D>
+where D: Digest + Send + Sync
+{
+    fn add_orphan_block(&mut self, block: Block) -> Result<(), ChainStorageError> {
+        let mut db = self
+            .db
+            .write()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        let hash = block.hash();
+        db.orphans.insert(hash, block);
+        Ok(())
+    }
+
+    fn accept_block(&mut self, block_hash: HashOutput) -> Result<(), ChainStorageError> {
+        let mut db = self
+            .db
+            .write()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        // lets get the block
+        let block = db
+            .orphans
+            .get(&block_hash)
+            .ok_or_else(|| ChainStorageError::ValueNotFound(DbKey::OrphanBlock(block_hash)))?;
+
+        let (header, inputs, outputs, kernels) = block.dissolve();
+        // insert headers
+        let k = header.height;
+        if db.headers.contains_key(&k) {
+            return Err(ChainStorageError::InvalidOperation(format!(
+                "Duplicate `BlockHeader` key `{}`",
+                k
+            )));
+        };
+        db.block_hashes.insert(header.hash(), k);
+        db.headers.insert(k, header);
+
+        // lets add the kernels
+        for kernel in kernels {
+            let k = kernel.hash();
+            if db.kernels.contains_key(&k) {
+                return Err(ChainStorageError::InvalidOperation(format!(
+                    "Duplicate `TransactionKernel` key `{}`",
+                    k.to_hex()
+                )));
+            }
+            db.curr_kernel_checkpoint.push_addition(k.clone());
+            db.kernels.insert(k, kernel);
+        }
+        // lets add the utxos
+        for utxo in outputs {
+            let k = utxo.hash();
+            if db.utxos.contains_key(&k) {
+                return Err(ChainStorageError::InvalidOperation(format!(
+                    "Duplicate `UnspentOutput` key `{}`",
+                    k.to_hex()
+                )));
+            }
+            db.curr_utxo_checkpoint.push_addition(k.clone());
+            db.curr_range_proof_checkpoint.push_addition(utxo.proof().hash());
+            let index = db.curr_range_proof_checkpoint.accumulated_nodes_added_count() - 1;
+            let v = MerkleNode {
+                index: index as usize,
+                value: utxo,
+            };
+            db.utxos.insert(k, v);
+        }
+
+        // lets spend the utxo's
+        for utxo in inputs {
+            let k = utxo.hash();
+            if !spend_utxo(&mut db, k) {
+                return Err(ChainStorageError::UnspendableInput);
+            }
+        }
+
+        Ok(())
+    }
+
+    // rewinds the database to the specified height. It will move every block that was rewound to the orphan pool
+    fn rewind_to_height(&mut self, height: u64) -> Result<(Vec<BlockHash>), ChainStorageError> {
+        let result = Vec::new();
+        Ok(result)
+    }
+
+    /// This is used when synchronising. Adds in the list of headers provided to the main chain
+    fn add_block_headers(&mut self, headers: Vec<BlockHeader>) -> Result<(), ChainStorageError> {
+        let mut db = self
+            .db
+            .write()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        for header in headers {
+            let k = header.height;
+            if db.headers.contains_key(&k) {
+                return Err(ChainStorageError::InvalidOperation(format!(
+                    "Duplicate `BlockHeader` key `{}`",
+                    k
+                )));
+            };
+            db.block_hashes.insert(header.hash(), k);
+            db.headers.insert(k, header);
+        }
+        Ok(())
+    }
+
+    /// This is used when synchronising. Adds in the list of kernels provided to the main chain
+    fn add_kernels(&mut self, kernels: Vec<TransactionKernel>) -> Result<(), ChainStorageError> {
+        let mut db = self
+            .db
+            .write()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        for kernel in kernels {
+            let k = kernel.hash();
+            if db.kernels.contains_key(&k) {
+                return Err(ChainStorageError::InvalidOperation(format!(
+                    "Duplicate `TransactionKernel` key `{}`",
+                    k.to_hex()
+                )));
+            }
+            db.curr_kernel_checkpoint.push_addition(k.clone());
+            db.kernels.insert(k, kernel);
+        }
+        Ok(())
+    }
+
+    /// This is used when synchronising. Adds in the list of utxos provided to the main chain
+    fn add_utxos(&mut self, utxos: Vec<TransactionOutput>) -> Result<(), ChainStorageError> {
+        let mut db = self
+            .db
+            .write()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        for utxo in utxos {
+            let k = utxo.hash();
+            if db.utxos.contains_key(&k) {
+                return Err(ChainStorageError::InvalidOperation(format!(
+                    "Duplicate `UnspentOutput` key `{}`",
+                    k.to_hex()
+                )));
+            }
+            db.curr_utxo_checkpoint.push_addition(k.clone());
+            db.curr_range_proof_checkpoint.push_addition(utxo.proof().hash());
+            let index = db.curr_range_proof_checkpoint.accumulated_nodes_added_count() - 1;
+            let v = MerkleNode {
+                index: index as usize,
+                value: utxo,
+            };
+            db.utxos.insert(k, v);
+        }
+        Ok(())
+    }
+
+    /// This is used when synchronising. Adds in the list of mmr leafs provided to the main chain
+    fn add_mmr(&mut self, tree: MmrTree, hashes: Vec<HashOutput>) -> Result<(), ChainStorageError> {
+        Ok(())
+    }
+
+    fn remove_orphan_blocks(&mut self, block_hashes: Vec<BlockHash>) -> Result<bool, ChainStorageError> {
+        let mut db = self
+            .db
+            .write()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        let mut results = true;
+        for hash in block_hashes {
+            if !db.orphans.contains_key(&hash) {
+                results = false;
+            }
+            db.orphans.remove(&hash);
+        }
+        Ok(results)
+    }
 
     fn fetch(&self, key: &DbKey) -> Result<Option<DbValue>, ChainStorageError> {
         let db = self.db_access()?;
@@ -395,17 +527,17 @@ where D: Digest + Send + Sync
         Ok(result)
     }
 
-    fn fetch_mmr_root(&self, tree: MmrTree) -> Result<Vec<u8>, ChainStorageError> {
-        let db = self.db_access()?;
-        let pruned_mmr = get_pruned_mmr(&db, &tree)?;
-        Ok(pruned_mmr.get_merkle_root()?)
-    }
+    // fn fetch_mmr_root(&self, tree: MmrTree) -> Result<Vec<u8>, ChainStorageError> {
+    //     let db = self.db_access()?;
+    //     let pruned_mmr = get_pruned_mmr(&db, &tree)?;
+    //     Ok(pruned_mmr.get_merkle_root()?)
+    // }
 
-    fn fetch_mmr_only_root(&self, tree: MmrTree) -> Result<Vec<u8>, ChainStorageError> {
-        let db = self.db_access()?;
-        let pruned_mmr = get_pruned_mmr(&db, &tree)?;
-        Ok(pruned_mmr.get_mmr_only_root()?)
-    }
+    // fn fetch_mmr_only_root(&self, tree: MmrTree) -> Result<Vec<u8>, ChainStorageError> {
+    //     let db = self.db_access()?;
+    //     let pruned_mmr = get_pruned_mmr(&db, &tree)?;
+    //     Ok(pruned_mmr.get_mmr_only_root()?)
+    // }
 
     fn calculate_mmr_root(
         &self,
@@ -432,28 +564,28 @@ where D: Digest + Send + Sync
 
     /// Returns an MMR proof extracted from the full Merkle mountain range without trimming the MMR using the roaring
     /// bitmap
-    fn fetch_mmr_proof(&self, tree: MmrTree, leaf_pos: usize) -> Result<MerkleProof, ChainStorageError> {
-        let db = self.db_access()?;
-        let pruned_mmr = get_pruned_mmr(&db, &tree)?;
-        let proof = match tree {
-            MmrTree::Utxo => MerkleProof::for_leaf_node(&pruned_mmr.mmr(), leaf_pos)?,
-            MmrTree::Kernel => MerkleProof::for_leaf_node(&pruned_mmr.mmr(), leaf_pos)?,
-            MmrTree::RangeProof => MerkleProof::for_leaf_node(&pruned_mmr.mmr(), leaf_pos)?,
-        };
-        Ok(proof)
-    }
+    // fn fetch_mmr_proof(&self, tree: MmrTree, leaf_pos: usize) -> Result<MerkleProof, ChainStorageError> {
+    //     let db = self.db_access()?;
+    //     let pruned_mmr = get_pruned_mmr(&db, &tree)?;
+    //     let proof = match tree {
+    //         MmrTree::Utxo => MerkleProof::for_leaf_node(&pruned_mmr.mmr(), leaf_pos)?,
+    //         MmrTree::Kernel => MerkleProof::for_leaf_node(&pruned_mmr.mmr(), leaf_pos)?,
+    //         MmrTree::RangeProof => MerkleProof::for_leaf_node(&pruned_mmr.mmr(), leaf_pos)?,
+    //     };
+    //     Ok(proof)
+    // }
 
-    fn fetch_checkpoint(&self, tree: MmrTree, height: u64) -> Result<MerkleCheckPoint, ChainStorageError> {
-        let db = self.db_access()?;
-        let tip_height = db.headers.len().saturating_sub(1) as u64;
-        let pruned_mode = self.fetch_metadata()?.is_pruned_node();
-        match tree {
-            MmrTree::Kernel => fetch_checkpoint(&db.kernel_checkpoints, pruned_mode, tip_height, height),
-            MmrTree::Utxo => fetch_checkpoint(&db.utxo_checkpoints, pruned_mode, tip_height, height),
-            MmrTree::RangeProof => fetch_checkpoint(&db.range_proof_checkpoints, pruned_mode, tip_height, height),
-        }?
-        .ok_or_else(|| ChainStorageError::OutOfRange)
-    }
+    // fn fetch_checkpoint(&self, tree: MmrTree, height: u64) -> Result<MerkleCheckPoint, ChainStorageError> {
+    //     let db = self.db_access()?;
+    //     let tip_height = db.headers.len().saturating_sub(1) as u64;
+    //     let pruned_mode = self.fetch_metadata()?.is_pruned_node();
+    //     match tree {
+    //         MmrTree::Kernel => fetch_checkpoint(&db.kernel_checkpoints, pruned_mode, tip_height, height),
+    //         MmrTree::Utxo => fetch_checkpoint(&db.utxo_checkpoints, pruned_mode, tip_height, height),
+    //         MmrTree::RangeProof => fetch_checkpoint(&db.range_proof_checkpoints, pruned_mode, tip_height, height),
+    //     }?
+    //     .ok_or_else(|| ChainStorageError::OutOfRange)
+    // }
 
     fn fetch_mmr_node_count(&self, tree: MmrTree, height: u64) -> Result<u32, ChainStorageError> {
         let db = self.db_access()?;
@@ -462,19 +594,6 @@ where D: Digest + Send + Sync
             MmrTree::Utxo => fetch_mmr_nodes_added_count(&db.utxo_checkpoints, height),
             MmrTree::RangeProof => fetch_mmr_nodes_added_count(&db.range_proof_checkpoints, height),
         }
-    }
-
-    fn fetch_mmr_node(&self, tree: MmrTree, pos: u32) -> Result<(Vec<u8>, bool), ChainStorageError> {
-        let db = self.db_access()?;
-        let (hash, deleted) = match tree {
-            MmrTree::Kernel => db.kernel_mmr.fetch_mmr_node(pos)?,
-            MmrTree::Utxo => db.utxo_mmr.fetch_mmr_node(pos)?,
-            MmrTree::RangeProof => db.range_proof_mmr.fetch_mmr_node(pos)?,
-        };
-        let hash = hash.ok_or_else(|| {
-            ChainStorageError::UnexpectedResult(format!("A leaf node hash in the {} MMR tree was not found", tree))
-        })?;
-        Ok((hash, deleted))
     }
 
     fn fetch_mmr_nodes(&self, tree: MmrTree, pos: u32, count: u32) -> Result<Vec<(Vec<u8>, bool)>, ChainStorageError> {
@@ -486,13 +605,27 @@ where D: Digest + Send + Sync
     }
 
     /// Iterate over all the stored orphan blocks and execute the function `f` for each block.
-    fn for_each_orphan<F>(&self, mut f: F) -> Result<(), ChainStorageError>
-    where F: FnMut(Result<(HashOutput, Block), ChainStorageError>) {
-        let db = self.db_access()?;
-        for (key, val) in db.orphans.iter() {
-            f(Ok((key.clone(), val.clone())));
-        }
-        Ok(())
+    // fn for_each_orphan<F>(&self, mut f: F) -> Result<(), ChainStorageError>
+    // where F: FnMut(Result<(HashOutput, Block), ChainStorageError>) {
+    //     let db = self.db_access()?;
+    //     for (key, val) in db.orphans.iter() {
+    //         f(Ok((key.clone(), val.clone())));
+    //     }
+    //     Ok(())
+    // }
+
+    fn fetch_parent_orphan_headers(
+        &self,
+        hash: HashOutput,
+        height: u64,
+    ) -> Result<Vec<BlockHeader>, ChainStorageError>
+    {
+        unimplemented!()
+    }
+
+    /// Returns a list of all orphan block headers
+    fn fetch_all_orphan_headers(&self) -> Result<Vec<BlockHeader>, ChainStorageError> {
+        unimplemented!()
     }
 
     fn fetch_mmr_leaf_index(&self, tree: MmrTree, hash: &Hash) -> Result<Option<u32>, ChainStorageError> {
@@ -511,34 +644,34 @@ where D: Digest + Send + Sync
     }
 
     /// Iterate over all the stored transaction kernels and execute the function `f` for each kernel.
-    fn for_each_kernel<F>(&self, mut f: F) -> Result<(), ChainStorageError>
-    where F: FnMut(Result<(HashOutput, TransactionKernel), ChainStorageError>) {
-        let db = self.db_access()?;
-        for (key, val) in db.kernels.iter() {
-            f(Ok((key.clone(), val.clone())));
-        }
-        Ok(())
-    }
+    // fn for_each_kernel<F>(&self, mut f: F) -> Result<(), ChainStorageError>
+    // where F: FnMut(Result<(HashOutput, TransactionKernel), ChainStorageError>) {
+    //     let db = self.db_access()?;
+    //     for (key, val) in db.kernels.iter() {
+    //         f(Ok((key.clone(), val.clone())));
+    //     }
+    //     Ok(())
+    // }
 
-    /// Iterate over all the stored block headers and execute the function `f` for each header.
-    fn for_each_header<F>(&self, mut f: F) -> Result<(), ChainStorageError>
-    where F: FnMut(Result<(u64, BlockHeader), ChainStorageError>) {
-        let db = self.db_access()?;
-        for (key, val) in db.headers.iter() {
-            f(Ok((*key, val.clone())));
-        }
-        Ok(())
-    }
+    // /// Iterate over all the stored block headers and execute the function `f` for each header.
+    // fn for_each_header<F>(&self, mut f: F) -> Result<(), ChainStorageError>
+    // where F: FnMut(Result<(u64, BlockHeader), ChainStorageError>) {
+    //     let db = self.db_access()?;
+    //     for (key, val) in db.headers.iter() {
+    //         f(Ok((*key, val.clone())));
+    //     }
+    //     Ok(())
+    // }
 
     /// Iterate over all the stored unspent transaction outputs and execute the function `f` for each UTXO.
-    fn for_each_utxo<F>(&self, mut f: F) -> Result<(), ChainStorageError>
-    where F: FnMut(Result<(HashOutput, TransactionOutput), ChainStorageError>) {
-        let db = self.db_access()?;
-        for (key, val) in db.utxos.iter() {
-            f(Ok((key.clone(), val.value.clone())));
-        }
-        Ok(())
-    }
+    // fn for_each_utxo<F>(&self, mut f: F) -> Result<(), ChainStorageError>
+    // where F: FnMut(Result<(HashOutput, TransactionOutput), ChainStorageError>) {
+    //     let db = self.db_access()?;
+    //     for (key, val) in db.utxos.iter() {
+    //         f(Ok((key.clone(), val.value.clone())));
+    //     }
+    //     Ok(())
+    // }
 
     /// Finds and returns the last stored header.
     fn fetch_last_header(&self) -> Result<Option<BlockHeader>, ChainStorageError> {

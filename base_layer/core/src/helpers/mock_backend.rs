@@ -37,7 +37,7 @@ use tari_mmr::{Hash, MerkleCheckPoint, MerkleProof};
 pub struct MockBackend;
 
 impl BlockchainBackend for MockBackend {
-    fn write(&mut self, _tx: DbTransaction) -> Result<(), ChainStorageError> {
+    fn accept_block(&mut self, block_hash: HashOutput) -> Result<(), ChainStorageError> {
         unimplemented!()
     }
 
@@ -49,11 +49,7 @@ impl BlockchainBackend for MockBackend {
         unimplemented!()
     }
 
-    fn fetch_mmr_root(&self, _tree: MmrTree) -> Result<HashOutput, ChainStorageError> {
-        unimplemented!()
-    }
-
-    fn fetch_mmr_only_root(&self, _tree: MmrTree) -> Result<HashOutput, ChainStorageError> {
+    fn remove_orphan_blocks(&mut self, block_hashes: Vec<BlockHeader>) -> Result<bool, ChainStorageError> {
         unimplemented!()
     }
 
@@ -67,19 +63,7 @@ impl BlockchainBackend for MockBackend {
         unimplemented!()
     }
 
-    fn fetch_mmr_proof(&self, _tree: MmrTree, _pos: usize) -> Result<MerkleProof, ChainStorageError> {
-        unimplemented!()
-    }
-
-    fn fetch_checkpoint(&self, _tree: MmrTree, _index: u64) -> Result<MerkleCheckPoint, ChainStorageError> {
-        unimplemented!()
-    }
-
     fn fetch_mmr_node_count(&self, _tree: MmrTree, _height: u64) -> Result<u32, ChainStorageError> {
-        unimplemented!()
-    }
-
-    fn fetch_mmr_node(&self, _tree: MmrTree, _pos: u32) -> Result<(Hash, bool), ChainStorageError> {
         unimplemented!()
     }
 
@@ -97,11 +81,7 @@ impl BlockchainBackend for MockBackend {
         unimplemented!()
     }
 
-    fn for_each_orphan<F>(&self, _f: F) -> Result<(), ChainStorageError>
-    where
-        Self: Sized,
-        F: FnMut(Result<(HashOutput, Block), ChainStorageError>),
-    {
+    fn fetch_all_orphan_headers(&self) -> Result<Vec<BlockHeader>, ChainStorageError> {
         unimplemented!()
     }
 
@@ -109,27 +89,20 @@ impl BlockchainBackend for MockBackend {
         unimplemented!()
     }
 
-    fn for_each_kernel<F>(&self, _f: F) -> Result<(), ChainStorageError>
-    where
-        Self: Sized,
-        F: FnMut(Result<(HashOutput, TransactionKernel), ChainStorageError>),
+    fn rewind_to_height(&mut self, height: u64) -> Result<(), ChainStorageError> {
+        unimplemented!()
+    }
+
+    fn fetch_parent_orphan_headers(
+        &self,
+        hash: HashOutput,
+        height: u64,
+    ) -> Result<Vec<BlockHeader>, ChainStorageError>
     {
         unimplemented!()
     }
 
-    fn for_each_header<F>(&self, _f: F) -> Result<(), ChainStorageError>
-    where
-        Self: Sized,
-        F: FnMut(Result<(u64, BlockHeader), ChainStorageError>),
-    {
-        unimplemented!()
-    }
-
-    fn for_each_utxo<F>(&self, _f: F) -> Result<(), ChainStorageError>
-    where
-        Self: Sized,
-        F: FnMut(Result<(HashOutput, TransactionOutput), ChainStorageError>),
-    {
+    fn add_orphan_block(&mut self, block: Block) -> Result<(), ChainStorageError> {
         unimplemented!()
     }
 
@@ -148,6 +121,22 @@ impl BlockchainBackend for MockBackend {
         _block_window: usize,
     ) -> Result<Vec<(EpochTime, Difficulty)>, ChainStorageError>
     {
+        unimplemented!()
+    }
+
+    fn add_block_headers(&mut self, headers: Vec<BlockHeader>) -> Result<(), ChainStorageError> {
+        unimplemented!()
+    }
+
+    fn add_kernels(&mut self, kernels: Vec<TransactionKernel>) -> Result<(), ChainStorageError> {
+        unimplemented!()
+    }
+
+    fn add_utxos(&mut self, utxos: Vec<TransactionOutput>) -> Result<(), ChainStorageError> {
+        unimplemented!()
+    }
+
+    fn add_mmr(&mut self, tree: MmrTree, hashes: Vec<HashOutput>) -> Result<(), ChainStorageError> {
         unimplemented!()
     }
 }

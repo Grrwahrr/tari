@@ -56,9 +56,9 @@ use crate::{
         memory_db::MemDbVec,
         ChainMetadata,
     },
-    proof_of_work::{Difficulty, PowAlgorithm},
+    proof_of_work::{Difficulty, PowAlgorithm, ProofOfWork},
     transactions::{
-        transaction::{TransactionKernel, TransactionOutput},
+        transaction::{TransactionInput, TransactionKernel, TransactionOutput},
         types::{HashDigest, HashOutput},
     },
 };
@@ -316,12 +316,176 @@ where D: Digest + Send + Sync
         Ok(())
     }
 
+    // This will reconstruct the blocks and returns a copy
+    fn reconstruct_block(&self, height: u64) -> Result<Block, ChainStorageError> {
+        // get header
+        let header: BlockHeader = lmdb_get(&self.env, &self.headers_db, &height)?
+            .ok_or_else(|| ChainStorageError::ValueNotFound(DbKey::BlockHeader(height)))?;
+        // get the checkpoint
+        let kernel_cp = self.fetch_checkpoint(MmrTree::Kernel, height)?;
+        let (kernel_hashes, _) = kernel_cp.into_parts();
+        let mut kernels = Vec::new();
+        // get kernels
+        for hash in kernel_hashes {
+            let kernel: TransactionKernel = lmdb_get(&self.env, &self.kernels_db, &hash)?
+                .ok_or_else(|| ChainStorageError::ValueNotFound(DbKey::TransactionKernel(hash)))?;
+            kernels.push(kernel);
+        }
+        let utxo_cp = self.fetch_checkpoint(MmrTree::Utxo, height)?;
+        let (utxo_hashes, deleted_nodes) = utxo_cp.into_parts();
+        // lets get the inputs
+        let inputs: Result<Vec<TransactionInput>, ChainStorageError> = deleted_nodes
+            .iter()
+            .map(|pos| {
+                self.fetch_mmr_nodes(MmrTree::Utxo, pos, 1).and_then(|node| {
+                    let (hash, deleted) = node[0];
+                    assert!(deleted);
+                    let val: TransactionOutput = lmdb_get(&self.env, &self.stxos_db, &hash)?
+                        .ok_or_else(|| ChainStorageError::ValueNotFound(DbKey::SpentOutput(hash)))?;
+                    Ok(TransactionInput::from(val))
+                })
+            })
+            .collect();
+        let inputs = inputs?;
+        // lets get the outputs
+        let mut outputs = Vec::with_capacity(utxo_hashes.len());
+        let mut spent = Vec::with_capacity(utxo_hashes.len());
+        for hash in utxo_hashes.into_iter() {
+            // The outputs could come from either the UTXO or STXO set
+            let val: Option<TransactionOutput> = lmdb_get(&self.env, &self.utxos_db, &hash)?;
+            if val.is_some() {
+                outputs.push(val.unwrap());
+                continue;
+            }
+            // Check the STXO set
+            let val: Option<TransactionOutput> = lmdb_get(&self.env, &self.stxos_db, &hash)?;
+            match val {
+                Some(v) => {
+                    spent.push(v.commitment.clone());
+                    outputs.push(v);
+                },
+                None => return Err(ChainStorageError::ValueNotFound(DbKey::SpentOutput(hash))),
+            }
+        }
+        let block = header
+            .into_builder()
+            .add_inputs(inputs)
+            .add_outputs(outputs)
+            .add_kernels(kernels)
+            .build();
+        Ok(block)
+    }
+
     // Reset any mmr txns that have been applied.
     fn reset_mmrs(&mut self) -> Result<(), ChainStorageError> {
         trace!(target: LOG_TARGET, "Reset mmrs called");
         self.kernel_mmr.reset()?;
         self.utxo_mmr.reset()?;
         self.range_proof_mmr.reset()?;
+        Ok(())
+    }
+
+    fn fetch_mmr_node(&self, tree: MmrTree, pos: u32) -> Result<(Vec<u8>, bool), ChainStorageError> {
+        let (hash, deleted) = match tree {
+            MmrTree::Kernel => self.kernel_mmr.fetch_mmr_node(pos)?,
+            MmrTree::Utxo => self.utxo_mmr.fetch_mmr_node(pos)?,
+            MmrTree::RangeProof => self.range_proof_mmr.fetch_mmr_node(pos)?,
+        };
+        let hash = hash.ok_or_else(|| {
+            ChainStorageError::UnexpectedResult(format!("A leaf node hash in the {} MMR tree was not found", tree))
+        })?;
+        Ok((hash, deleted))
+    }
+
+    // This function will remove a block from the orphan pool, deconstruct the block and add the block to the
+    // block_header, utxo, kernel databases
+    fn move_block_from_orphan_to_main_chain(&mut self, block_hash: HashOutput) -> Result<(), ChainStorageError> {
+        let val: Block = lmdb_get(&self.env, &self.orphans_db, &block_hash)?
+            .ok_or_else(|| ChainStorageError::ValueNotFound(DbKey::OrphanBlock(block_hash)))?;
+
+        let txn = WriteTransaction::new(self.env.clone()).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        let (header, inputs, outputs, kernels) = val.dissolve();
+        // lets insert the headers
+        let k = header.height;
+        if lmdb_exists(&self.env, &self.headers_db, &k)? {
+            return Err(ChainStorageError::InvalidOperation(format!(
+                "Duplicate `BlockHeader` key `{}`",
+                k
+            )));
+        }
+        let hash = val.hash();
+        lmdb_insert(&txn, &self.block_hashes_db, &hash, &k)?;
+        lmdb_insert(&txn, &self.headers_db, &k, &header)?;
+
+        // lets spend the inputs
+        for input in inputs {
+            let k = input.hash();
+            lmdb_delete(&txn, &self.stxos_db, &k)?;
+            lmdb_delete(&txn, &self.txos_hash_to_index_db, &k)?;
+        }
+
+        // lets the insert the new utxo's
+
+        for utxo in outputs {
+            let k = utxo.hash();
+            if lmdb_exists(&self.env, &self.utxos_db, &k)? {
+                return Err(ChainStorageError::InvalidOperation(format!(
+                    "Duplicate `UnspentOutput` key `{}`",
+                    k.to_hex()
+                )));
+            }
+            self.curr_utxo_checkpoint.push_addition(k.clone());
+            self.curr_range_proof_checkpoint.push_addition(utxo.proof().hash());
+
+            lmdb_insert(&txn, &self.utxos_db, &k, &utxo)?;
+            let index = self.curr_range_proof_checkpoint.accumulated_nodes_added_count() - 1;
+            lmdb_insert(&txn, &self.txos_hash_to_index_db, &k, &index)?;
+        }
+        // lets insert the kernels
+        for kernel in kernels {
+            let k = kernel.hash();
+            if lmdb_exists(&self.env, &self.kernels_db, &k)? {
+                return Err(ChainStorageError::InvalidOperation(format!(
+                    "Duplicate `TransactionKernel` key `{}`",
+                    k.to_hex()
+                )));
+            }
+            self.curr_kernel_checkpoint.push_addition(k.clone());
+            lmdb_insert(&txn, &self.kernels_db, &k, &kernel)?;
+        }
+        // lets remove the orphan
+        lmdb_delete(&txn, &self.orphans_db, &k)?;
+        // lets update the meta data
+        let accumulated_difficulty =
+            ProofOfWork::new_from_difficulty(&header.pow, ProofOfWork::achieved_difficulty(&header))
+                .total_accumulated_difficulty();
+        lmdb_replace(
+            &txn,
+            &self.metadata_db,
+            &(MetadataKey::ChainHeight.clone() as u32),
+            &Some(header.height),
+        )?;
+        lmdb_replace(
+            &txn,
+            &self.metadata_db,
+            &(MetadataKey::BestBlock.clone() as u32),
+            &Some(header.hash()),
+        )?;
+        lmdb_replace(
+            &txn,
+            &self.metadata_db,
+            &(MetadataKey::AccumulatedWork.clone() as u32),
+            &Some(accumulated_difficulty),
+        )?;
+
+        txn.commit()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        self.mem_metadata = ChainMetadata {
+            height_of_longest_chain: fetch_chain_height(&self.env, &self.metadata_db)?,
+            best_block: fetch_best_block(&self.env, &self.metadata_db)?,
+            pruning_horizon: fetch_pruning_horizon(&self.env, &self.metadata_db)?,
+            accumulated_difficulty: fetch_accumulated_work(&self.env, &self.metadata_db)?,
+        };
         Ok(())
     }
 
@@ -339,76 +503,9 @@ where D: Digest + Send + Sync
                         lmdb_replace(&txn, &self.metadata_db, &(k.clone() as u32), &v)?;
                         update_mem_metadata = true;
                     },
-                    DbKeyValuePair::BlockHeader(k, v) => {
-                        if lmdb_exists(&self.env, &self.headers_db, &k)? {
-                            return Err(ChainStorageError::InvalidOperation(format!(
-                                "Duplicate `BlockHeader` key `{}`",
-                                k
-                            )));
-                        }
-                        let hash = v.hash();
-                        lmdb_insert(&txn, &self.block_hashes_db, &hash, &k)?;
-                        lmdb_insert(&txn, &self.headers_db, &k, &v)?;
-                    },
-                    DbKeyValuePair::UnspentOutput(k, v) => {
-                        if lmdb_exists(&self.env, &self.utxos_db, &k)? {
-                            return Err(ChainStorageError::InvalidOperation(format!(
-                                "Duplicate `UnspentOutput` key `{}`",
-                                k.to_hex()
-                            )));
-                        }
-                        self.curr_utxo_checkpoint.push_addition(k.clone());
-                        self.curr_range_proof_checkpoint.push_addition(v.proof().hash());
-
-                        lmdb_insert(&txn, &self.utxos_db, &k, &v)?;
-                        let index = self.curr_range_proof_checkpoint.accumulated_nodes_added_count() - 1;
-                        lmdb_insert(&txn, &self.txos_hash_to_index_db, &k, &index)?;
-                    },
-                    DbKeyValuePair::TransactionKernel(k, v) => {
-                        if lmdb_exists(&self.env, &self.kernels_db, &k)? {
-                            return Err(ChainStorageError::InvalidOperation(format!(
-                                "Duplicate `TransactionKernel` key `{}`",
-                                k.to_hex()
-                            )));
-                        }
-                        self.curr_kernel_checkpoint.push_addition(k.clone());
-                        lmdb_insert(&txn, &self.kernels_db, &k, &v)?;
-                    },
-                    DbKeyValuePair::OrphanBlock(k, v) => {
-                        lmdb_replace(&txn, &self.orphans_db, &k, &v)?;
-                    },
                 },
                 WriteOperation::Delete(delete) => match delete {
                     DbKey::Metadata(_) => {}, // no-op
-                    DbKey::BlockHeader(k) => {
-                        let val: Option<BlockHeader> = lmdb_get(&self.env, &self.headers_db, &k)?;
-                        if let Some(v) = val {
-                            let hash = v.hash();
-                            lmdb_delete(&txn, &self.block_hashes_db, &hash)?;
-                            lmdb_delete(&txn, &self.headers_db, &k)?;
-                        }
-                    },
-                    DbKey::BlockHash(hash) => {
-                        let result: Option<u64> = lmdb_get(&self.env, &self.block_hashes_db, &hash)?;
-                        if let Some(k) = result {
-                            lmdb_delete(&txn, &self.block_hashes_db, &hash)?;
-                            lmdb_delete(&txn, &self.headers_db, &k)?;
-                        }
-                    },
-                    DbKey::UnspentOutput(k) => {
-                        lmdb_delete(&txn, &self.utxos_db, &k)?;
-                        lmdb_delete(&txn, &self.txos_hash_to_index_db, &k)?;
-                    },
-                    DbKey::SpentOutput(k) => {
-                        lmdb_delete(&txn, &self.stxos_db, &k)?;
-                        lmdb_delete(&txn, &self.txos_hash_to_index_db, &k)?;
-                    },
-                    DbKey::TransactionKernel(k) => {
-                        lmdb_delete(&txn, &self.kernels_db, &k)?;
-                    },
-                    DbKey::OrphanBlock(k) => {
-                        lmdb_delete(&txn, &self.orphans_db, &k)?;
-                    },
                 },
                 WriteOperation::Spend(key) => match key {
                     DbKey::UnspentOutput(hash) => {
@@ -458,14 +555,6 @@ where D: Digest + Send + Sync
         txn.commit()
             .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
 
-        if update_mem_metadata {
-            self.mem_metadata = ChainMetadata {
-                height_of_longest_chain: fetch_chain_height(&self.env, &self.metadata_db)?,
-                best_block: fetch_best_block(&self.env, &self.metadata_db)?,
-                pruning_horizon: fetch_pruning_horizon(&self.env, &self.metadata_db)?,
-                accumulated_difficulty: fetch_accumulated_work(&self.env, &self.metadata_db)?,
-            };
-        }
         Ok(())
     }
 
@@ -519,6 +608,22 @@ where D: Digest + Send + Sync
             .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
         Ok(num_removed)
     }
+
+    // Retrieves the checkpoint corresponding to the provided height, if the checkpoint is part of the horizon state
+    // then a BeyondPruningHorizon error will be produced.
+    fn fetch_checkpoint(&self, tree: MmrTree, height: u64) -> Result<MerkleCheckPoint, ChainStorageError> {
+        let tip_height = lmdb_len(&self.env, &self.headers_db)?.saturating_sub(1) as u64;
+        let pruned_mode = self.mem_metadata.is_pruned_node();
+        match tree {
+            MmrTree::Kernel => tree_fetch_checkpoint(&self.kernel_checkpoints, pruned_mode, tip_height, height),
+            MmrTree::Utxo => tree_fetch_checkpoint(&self.utxo_checkpoints, pruned_mode, tip_height, height),
+            MmrTree::RangeProof => {
+                tree_fetch_checkpoint(&self.range_proof_checkpoints, pruned_mode, tip_height, height)
+            },
+        }
+        .map_err(|e| ChainStorageError::AccessError(format!("Checkpoint error: {}", e.to_string())))?
+        .ok_or_else(|| ChainStorageError::OutOfRange)
+    }
 }
 
 pub fn create_lmdb_database<P: AsRef<Path>>(
@@ -551,17 +656,179 @@ pub fn create_lmdb_database<P: AsRef<Path>>(
 impl<D> BlockchainBackend for LMDBDatabase<D>
 where D: Digest + Send + Sync
 {
-    fn write(&mut self, tx: DbTransaction) -> Result<(), ChainStorageError> {
-        if tx.operations.is_empty() {
-            return Ok(());
-        }
-        match self.apply_mmr_and_storage_txs(&tx) {
-            Ok(_) => self.commit_mmrs(tx),
+    fn add_orphan_block(&mut self, block: Block) -> Result<(), ChainStorageError> {
+        let hash = block.hash();
+        let txn = WriteTransaction::new(self.env.clone()).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        lmdb_insert(&txn, &self.orphans_db, &hash, &block)?;
+        txn.commit().map_err(|e| ChainStorageError::AccessError(e.to_string()))
+    }
+
+    fn accept_block(&mut self, block_hash: HashOutput) -> Result<(), ChainStorageError> {
+        match self.move_block_from_orphan_to_main_chain(block_hash) {
+            Ok(_) => Ok(()),
             Err(e) => {
                 self.reset_mmrs()?;
                 Err(e)
             },
         }
+    }
+
+    // rewinds the database to the specified height. It will move every block that was rewound to the orphan pool
+    fn rewind_to_height(&mut self, height: u64) -> Result<(Vec<BlockHash>), ChainStorageError> {
+        let hashes = Vec::new();
+        let txn = WriteTransaction::new(self.env.clone()).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        let chain_height = self.mem_metadata.height_of_longest_chain.unwrap_or(0);
+        let mut removed_blocks = Vec::new();
+        for rewind_height in ((height + 1)..=chain_height).rev() {
+            // Reconstruct block at height and add to orphan block pool
+
+            let orphaned_block = self.reconstruct_block(rewind_height)?; // fetch_block(&**db, rewind_height)?.block().clone();
+                                                                         // 1st we add the removed block back to the orphan pool.
+            let hash = orphaned_block.hash();
+            lmdb_insert(&txn, &self.orphans_db, &hash, &orphaned_block)?;
+            removed_blocks.push(hash);
+
+            // Now we need to remove that block
+            // Remove Header and block hash
+            txn.delete(DbKey::BlockHeader(rewind_height)); // Will also delete the blockhash
+                                                           // Remove Kernels
+            self.fetch_checkpoint(MmrTree::Kernel, rewind_height)?
+                .nodes_added()
+                .iter()
+                .for_each(|hash_output| {
+                    txn.delete(DbKey::TransactionKernel(hash_output.clone()));
+                });
+            // Remove UTXOs and move STXOs back to UTXO set
+            let (nodes_added, nodes_deleted) = fetch_checkpoint(&**db, MmrTree::Utxo, rewind_height)?.into_parts();
+            nodes_added.iter().for_each(|hash_output| {
+                txn.delete(DbKey::UnspentOutput(hash_output.clone()));
+            });
+            for pos in nodes_deleted.iter() {
+                db.fetch_mmr_node(MmrTree::Utxo, pos).and_then(|(stxo_hash, deleted)| {
+                    assert!(deleted);
+                    txn.unspend_stxo(stxo_hash);
+                    Ok(())
+                })?;
+            }
+        }
+        // Rewind MMRs
+        txn.rewind_kernel_mmr(steps_back);
+        txn.rewind_utxo_mmr(steps_back);
+        txn.rewind_rp_mmr(steps_back);
+
+        txn.commit()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+    }
+
+    /// This is used when synchronising. Adds in the list of headers provided to the main chain
+    fn add_block_headers(&mut self, headers: Vec<BlockHeader>) -> Result<(), ChainStorageError> {
+        let txn = WriteTransaction::new(self.env.clone()).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        for header in headers {
+            // lets insert the headers
+            let k = header.height;
+            if lmdb_exists(&self.env, &self.headers_db, &k)? {
+                return Err(ChainStorageError::InvalidOperation(format!(
+                    "Duplicate `BlockHeader` key `{}`",
+                    k
+                )));
+            }
+            let hash = header.hash();
+            lmdb_insert(&txn, &self.block_hashes_db, &hash, &k)?;
+            lmdb_insert(&txn, &self.headers_db, &k, &header)?;
+        }
+        txn.commit().map_err(|e| ChainStorageError::AccessError(e.to_string()))
+    }
+
+    /// This is used when synchronising. Adds in the list of kernels provided to the main chain
+    fn add_kernels(&mut self, kernels: Vec<TransactionKernel>) -> Result<(), ChainStorageError> {
+        let txn = WriteTransaction::new(self.env.clone()).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        for kernel in kernels {
+            let k = kernel.hash();
+            if lmdb_exists(&self.env, &self.kernels_db, &k)? {
+                return Err(ChainStorageError::InvalidOperation(format!(
+                    "Duplicate `TransactionKernel` key `{}`",
+                    k.to_hex()
+                )));
+            }
+            self.curr_kernel_checkpoint.push_addition(k.clone());
+            lmdb_insert(&txn, &self.kernels_db, &k, &kernel)?;
+        }
+
+        txn.commit().map_err(|e| ChainStorageError::AccessError(e.to_string()))
+    }
+
+    /// This is used when synchronising. Adds in the list of utxos provided to the main chain
+    fn add_utxos(&mut self, utxos: Vec<TransactionOutput>) -> Result<(), ChainStorageError> {
+        let txn = WriteTransaction::new(self.env.clone()).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        for utxo in utxos {
+            let k = utxo.hash();
+            if lmdb_exists(&self.env, &self.utxos_db, &k)? {
+                return Err(ChainStorageError::InvalidOperation(format!(
+                    "Duplicate `UnspentOutput` key `{}`",
+                    k.to_hex()
+                )));
+            }
+            self.curr_utxo_checkpoint.push_addition(k.clone());
+            self.curr_range_proof_checkpoint.push_addition(utxo.proof().hash());
+
+            lmdb_insert(&txn, &self.utxos_db, &k, &utxo)?;
+            let index = self.curr_range_proof_checkpoint.accumulated_nodes_added_count() - 1;
+            lmdb_insert(&txn, &self.txos_hash_to_index_db, &k, &index)?;
+        }
+        Ok(())
+    }
+
+    /// This is used when synchronising. Adds in the mmrs provided to the main chain
+    fn add_mmr(&mut self, tree: MmrTree, hashes: Vec<HashOutput>) -> Result<(), ChainStorageError> {
+        Ok(())
+    }
+
+    /// This function is used to remove orphan blocks
+    /// This function will return ok if it did not encounter an error. If a orphan block was not found, it should return
+    /// Ok(false)
+    fn remove_orphan_blocks(&mut self, block_hashes: Vec<BlockHash>) -> Result<bool, ChainStorageError> {
+        let mut results = true;
+        for hash in block_hashes {
+            if !lmdb_exists(&self.env, &self.orphans_db, &hash)? {
+                results = false;
+            }
+            let txn =
+                WriteTransaction::new(self.env.clone()).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+            lmdb_delete(&txn, &self.orphans_db, &hash)?;
+            txn.commit()
+                .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        }
+        Ok(results)
+    }
+
+    /// returns a list of orphan block headers that are parents to the named hash
+    fn fetch_parent_orphan_headers(
+        &self,
+        hash: HashOutput,
+        height: u64,
+    ) -> Result<Vec<BlockHeader>, ChainStorageError>
+    {
+        let mut headers = Vec::new();
+
+        lmdb_for_each::<_, HashOutput, Block>(&self.env, &self.orphans_db, |pair| {
+            let (_, block) = pair.unwrap();
+            if (block.header.prev_hash == hash) && (block.header.height == height + 1) {
+                // we found a match, let save to call later
+                headers.push(block.header);
+            }
+        });
+        Ok(headers)
+    }
+
+    /// Returns a list of all orphan block headers
+    fn fetch_all_orphan_headers(&self) -> Result<Vec<BlockHeader>, ChainStorageError> {
+        let mut headers = Vec::new();
+        lmdb_for_each::<_, HashOutput, Block>(&self.env, &self.orphans_db, |pair| {
+            let (_, block) = pair.unwrap();
+            // we found a match, let save to call later
+            headers.push(block.header);
+        });
+        Ok(headers)
     }
 
     fn fetch(&self, key: &DbKey) -> Result<Option<DbValue>, ChainStorageError> {
@@ -600,6 +867,10 @@ where D: Digest + Send + Sync
                 let val: Option<Block> = lmdb_get(&self.env, &self.orphans_db, k)?;
                 val.map(|val| DbValue::OrphanBlock(Box::new(val)))
             },
+            DbKey::Block(k) => {
+                let block = self.reconstruct_block(*k)?;
+                Some(DbValue::OrphanBlock(Box::new(block)))
+            },
         })
     }
 
@@ -615,15 +886,15 @@ where D: Digest + Send + Sync
         })
     }
 
-    fn fetch_mmr_root(&self, tree: MmrTree) -> Result<Vec<u8>, ChainStorageError> {
-        let pruned_mmr = self.get_pruned_mmr(&tree)?;
-        Ok(pruned_mmr.get_merkle_root()?)
-    }
+    // fn fetch_mmr_root(&self, tree: MmrTree) -> Result<Vec<u8>, ChainStorageError> {
+    //     let pruned_mmr = self.get_pruned_mmr(&tree)?;
+    //     Ok(pruned_mmr.get_merkle_root()?)
+    // }
 
-    fn fetch_mmr_only_root(&self, tree: MmrTree) -> Result<Vec<u8>, ChainStorageError> {
-        let pruned_mmr = self.get_pruned_mmr(&tree)?;
-        Ok(pruned_mmr.get_mmr_only_root()?)
-    }
+    // fn fetch_mmr_only_root(&self, tree: MmrTree) -> Result<Vec<u8>, ChainStorageError> {
+    //     let pruned_mmr = self.get_pruned_mmr(&tree)?;
+    //     Ok(pruned_mmr.get_mmr_only_root()?)
+    // }
 
     fn calculate_mmr_root(
         &self,
@@ -649,28 +920,14 @@ where D: Digest + Send + Sync
 
     /// Returns an MMR proof extracted from the full Merkle mountain range without trimming the MMR using the roaring
     /// bitmap
-    fn fetch_mmr_proof(&self, tree: MmrTree, leaf_pos: usize) -> Result<MerkleProof, ChainStorageError> {
-        let pruned_mmr = self.get_pruned_mmr(&tree)?;
-        Ok(match tree {
-            MmrTree::Utxo => MerkleProof::for_leaf_node(&pruned_mmr.mmr(), leaf_pos)?,
-            MmrTree::Kernel => MerkleProof::for_leaf_node(&pruned_mmr.mmr(), leaf_pos)?,
-            MmrTree::RangeProof => MerkleProof::for_leaf_node(&pruned_mmr.mmr(), leaf_pos)?,
-        })
-    }
-
-    // Retrieves the checkpoint corresponding to the provided height, if the checkpoint is part of the horizon state
-    // then a BeyondPruningHorizon error will be produced.
-    fn fetch_checkpoint(&self, tree: MmrTree, height: u64) -> Result<MerkleCheckPoint, ChainStorageError> {
-        let tip_height = lmdb_len(&self.env, &self.headers_db)?.saturating_sub(1) as u64;
-        let pruned_mode = self.mem_metadata.is_pruned_node();
-        match tree {
-            MmrTree::Kernel => fetch_checkpoint(&self.kernel_checkpoints, pruned_mode, tip_height, height),
-            MmrTree::Utxo => fetch_checkpoint(&self.utxo_checkpoints, pruned_mode, tip_height, height),
-            MmrTree::RangeProof => fetch_checkpoint(&self.range_proof_checkpoints, pruned_mode, tip_height, height),
-        }
-        .map_err(|e| ChainStorageError::AccessError(format!("Checkpoint error: {}", e.to_string())))?
-        .ok_or_else(|| ChainStorageError::OutOfRange)
-    }
+    // fn fetch_mmr_proof(&self, tree: MmrTree, leaf_pos: usize) -> Result<MerkleProof, ChainStorageError> {
+    //     let pruned_mmr = self.get_pruned_mmr(&tree)?;
+    //     Ok(match tree {
+    //         MmrTree::Utxo => MerkleProof::for_leaf_node(&pruned_mmr.mmr(), leaf_pos)?,
+    //         MmrTree::Kernel => MerkleProof::for_leaf_node(&pruned_mmr.mmr(), leaf_pos)?,
+    //         MmrTree::RangeProof => MerkleProof::for_leaf_node(&pruned_mmr.mmr(), leaf_pos)?,
+    //     })
+    // }
 
     fn fetch_mmr_node_count(&self, tree: MmrTree, height: u64) -> Result<u32, ChainStorageError> {
         match tree {
@@ -678,18 +935,6 @@ where D: Digest + Send + Sync
             MmrTree::Utxo => fetch_mmr_nodes_added_count(&self.utxo_checkpoints, height),
             MmrTree::RangeProof => fetch_mmr_nodes_added_count(&self.range_proof_checkpoints, height),
         }
-    }
-
-    fn fetch_mmr_node(&self, tree: MmrTree, pos: u32) -> Result<(Vec<u8>, bool), ChainStorageError> {
-        let (hash, deleted) = match tree {
-            MmrTree::Kernel => self.kernel_mmr.fetch_mmr_node(pos)?,
-            MmrTree::Utxo => self.utxo_mmr.fetch_mmr_node(pos)?,
-            MmrTree::RangeProof => self.range_proof_mmr.fetch_mmr_node(pos)?,
-        };
-        let hash = hash.ok_or_else(|| {
-            ChainStorageError::UnexpectedResult(format!("A leaf node hash in the {} MMR tree was not found", tree))
-        })?;
-        Ok((hash, deleted))
     }
 
     fn fetch_mmr_nodes(&self, tree: MmrTree, pos: u32, count: u32) -> Result<Vec<(Vec<u8>, bool)>, ChainStorageError> {
@@ -708,11 +953,11 @@ where D: Digest + Send + Sync
         })
     }
 
-    /// Iterate over all the stored orphan blocks and execute the function `f` for each block.
-    fn for_each_orphan<F>(&self, f: F) -> Result<(), ChainStorageError>
-    where F: FnMut(Result<(HashOutput, Block), ChainStorageError>) {
-        lmdb_for_each::<F, HashOutput, Block>(&self.env, &self.orphans_db, f)
-    }
+    // /// Iterate over all the stored orphan blocks and execute the function `f` for each block.
+    // fn for_each_orphan<F>(&self, f: F) -> Result<(), ChainStorageError>
+    // where F: FnMut(Result<(HashOutput, Block), ChainStorageError>) {
+    //     lmdb_for_each::<F, HashOutput, Block>(&self.env, &self.orphans_db, f)
+    // }
 
     /// Returns the number of blocks in the block orphan pool.
     fn get_orphan_count(&self) -> Result<usize, ChainStorageError> {
@@ -720,22 +965,22 @@ where D: Digest + Send + Sync
     }
 
     /// Iterate over all the stored transaction kernels and execute the function `f` for each kernel.
-    fn for_each_kernel<F>(&self, f: F) -> Result<(), ChainStorageError>
-    where F: FnMut(Result<(HashOutput, TransactionKernel), ChainStorageError>) {
-        lmdb_for_each::<F, HashOutput, TransactionKernel>(&self.env, &self.kernels_db, f)
-    }
+    // fn for_each_kernel<F>(&self, f: F) -> Result<(), ChainStorageError>
+    // where F: FnMut(Result<(HashOutput, TransactionKernel), ChainStorageError>) {
+    //     lmdb_for_each::<F, HashOutput, TransactionKernel>(&self.env, &self.kernels_db, f)
+    // }
 
-    /// Iterate over all the stored block headers and execute the function `f` for each header.
-    fn for_each_header<F>(&self, f: F) -> Result<(), ChainStorageError>
-    where F: FnMut(Result<(u64, BlockHeader), ChainStorageError>) {
-        lmdb_for_each::<F, u64, BlockHeader>(&self.env, &self.headers_db, f)
-    }
+    // /// Iterate over all the stored block headers and execute the function `f` for each header.
+    // fn for_each_header<F>(&self, f: F) -> Result<(), ChainStorageError>
+    // where F: FnMut(Result<(u64, BlockHeader), ChainStorageError>) {
+    //     lmdb_for_each::<F, u64, BlockHeader>(&self.env, &self.headers_db, f)
+    // }
 
     /// Iterate over all the stored unspent transaction outputs and execute the function `f` for each kernel.
-    fn for_each_utxo<F>(&self, f: F) -> Result<(), ChainStorageError>
-    where F: FnMut(Result<(HashOutput, TransactionOutput), ChainStorageError>) {
-        lmdb_for_each::<F, HashOutput, TransactionOutput>(&self.env, &self.utxos_db, f)
-    }
+    // fn for_each_utxo<F>(&self, f: F) -> Result<(), ChainStorageError>
+    // where F: FnMut(Result<(HashOutput, TransactionOutput), ChainStorageError>) {
+    //     lmdb_for_each::<F, HashOutput, TransactionOutput>(&self.env, &self.utxos_db, f)
+    // }
 
     /// Finds and returns the last stored header.
     fn fetch_last_header(&self) -> Result<Option<BlockHeader>, ChainStorageError> {
@@ -841,7 +1086,7 @@ fn fetch_pruning_horizon(env: &Environment, db: &Database) -> Result<u64, ChainS
 
 // Retrieves the checkpoint corresponding to the provided height, if the checkpoint is part of the horizon state then a
 // BeyondPruningHorizon error will be produced.
-fn fetch_checkpoint<T>(
+fn tree_fetch_checkpoint<T>(
     checkpoints: &T,
     pruned_mode: bool,
     tip_height: u64,

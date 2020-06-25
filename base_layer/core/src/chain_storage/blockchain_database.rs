@@ -129,25 +129,39 @@ impl<B: BlockchainBackend> Clone for Validators<B> {
 /// operation within it must succeed, or they all fail. Failure to support this contract could lead to
 /// synchronisation issues in your database backend.
 ///
-/// Data is passed to and from the backend via the [DbKey], [DbValue], and [DbValueKey] enums. This strategy allows
-/// us to keep the reading and writing API extremely simple. Extending the types of data that the back ends can handle
-/// will entail adding to those enums, and the back ends, while this trait can remain unchanged.
+/// This trait is written so that every it is assumed that every function call should be atomic, e.i. if some part of
+/// the instruction fails, the entire call should be reversed
 pub trait BlockchainBackend: Send + Sync {
-    /// Commit the transaction given to the backend. If there is an error, the transaction must be rolled back, and
-    /// the error condition returned. On success, every operation in the transaction will have been committed, and
-    /// the function will return `Ok(())`.
-    fn write(&mut self, tx: DbTransaction) -> Result<(), ChainStorageError>;
+    /// Adds a block to the orphan database. This function assumes that the stateless validation has passed on the
+    /// block.
+    fn add_orphan_block(&mut self, block: Block) -> Result<(), ChainStorageError>;
+    /// This function will move a block from the orphan pool to the main chain. It assumes that the block has passed
+    /// full stateful validation
+    fn accept_block(&mut self, block_hash: HashOutput) -> Result<(), ChainStorageError>;
+    // rewinds the database to the specified height. It will move every block that was rewound to the orphan pool
+    // This will return the hashes of every block that was moved to the orphan pool
+    fn rewind_to_height(&mut self, height: u64) -> Result<(Vec<BlockHash>), ChainStorageError>;
+    /// This is used when synchronising. Adds in the list of headers provided to the main chain
+    fn add_block_headers(&mut self, headers: Vec<BlockHeader>) -> Result<(), ChainStorageError>;
+    /// This is used when synchronising. Adds in the list of kernels provided to the main chain
+    fn add_kernels(&mut self, kernels: Vec<TransactionKernel>) -> Result<(), ChainStorageError>;
+    /// This is used when synchronising. Adds in the list of utxos provided to the main chain
+    fn add_utxos(&mut self, utxos: Vec<TransactionOutput>) -> Result<(), ChainStorageError>;
+    /// This is used when synchronising. Adds in the list of mmr leafs provided to the main chain
+    fn add_mmr(&mut self, tree: MmrTree, hashes: Vec<HashOutput>) -> Result<(), ChainStorageError>;
+    /// This function is used to remove orphan blocks
+    /// This function will return ok if it did not encounter an error. If a orphan block was not found, it should return
+    /// Ok(false)
+    fn remove_orphan_blocks(&mut self, block_hashes: Vec<BlockHash>) -> Result<bool, ChainStorageError>;
     /// Fetch a value from the back end corresponding to the given key. If the value is not found, `get` must return
     /// `Ok(None)`. It should only error if there is an access or integrity issue with the underlying back end.
     fn fetch(&self, key: &DbKey) -> Result<Option<DbValue>, ChainStorageError>;
     /// Checks to see whether the given key exists in the back end. This function should only fail if there is an
     /// access or integrity issue with the back end.
     fn contains(&self, key: &DbKey) -> Result<bool, ChainStorageError>;
-    /// Fetches the merklish root for the MMR tree identified by the key. This function should only fail if there is an
-    /// access or integrity issue with the back end.
-    fn fetch_mmr_root(&self, tree: MmrTree) -> Result<HashOutput, ChainStorageError>;
+    // DELETE? fn fetch_mmr_root(&self, tree: MmrTree) -> Result<HashOutput, ChainStorageError>;
     /// Returns only the MMR merkle root without the state of the roaring bitmap.
-    fn fetch_mmr_only_root(&self, tree: MmrTree) -> Result<HashOutput, ChainStorageError>;
+    // DELETE? fn fetch_mmr_only_root(&self, tree: MmrTree) -> Result<HashOutput, ChainStorageError>;
     /// Fetches the merklish root for the MMR tree identified by the key after the current additions and deletions have
     /// temporarily been applied. Deletions of hashes from the MMR can only be applied for UTXOs.
     fn calculate_mmr_root(
@@ -157,42 +171,45 @@ pub trait BlockchainBackend: Send + Sync {
         deletions: Vec<HashOutput>,
     ) -> Result<HashOutput, ChainStorageError>;
     /// Constructs a merkle proof for the specified merkle mountain range and the given leaf position.
-    fn fetch_mmr_proof(&self, tree: MmrTree, pos: usize) -> Result<MerkleProof, ChainStorageError>;
-    /// Fetches the checkpoint corresponding to the provided height, the checkpoint consist of the list of nodes
-    /// added & deleted for the given Merkle tree.
-    fn fetch_checkpoint(&self, tree: MmrTree, height: u64) -> Result<MerkleCheckPoint, ChainStorageError>;
+    // DELETE? fn fetch_mmr_proof(&self, tree: MmrTree, pos: usize) -> Result<MerkleProof, ChainStorageError>;
     /// Fetches the total merkle mountain range node count upto the specified height.
     fn fetch_mmr_node_count(&self, tree: MmrTree, height: u64) -> Result<u32, ChainStorageError>;
     /// Fetches the leaf node hash and its deletion status for the nth leaf node in the given MMR tree.
-    fn fetch_mmr_node(&self, tree: MmrTree, pos: u32) -> Result<(Hash, bool), ChainStorageError>;
+    // delete, can use function below with count 1 fn fetch_mmr_node(&self, tree: MmrTree, pos: u32) -> Result<(Hash,
+    // bool), ChainStorageError>;
     /// Fetches the set of leaf node hashes and their deletion status' for the nth to nth+count leaf node index in the
     /// given MMR tree.
     fn fetch_mmr_nodes(&self, tree: MmrTree, pos: u32, count: u32) -> Result<Vec<(Hash, bool)>, ChainStorageError>;
     /// Fetches the leaf index of the provided leaf node hash in the given MMR tree.
     fn fetch_mmr_leaf_index(&self, tree: MmrTree, hash: &Hash) -> Result<Option<u32>, ChainStorageError>;
     /// Performs the function F for each orphan block in the orphan pool.
-    fn for_each_orphan<F>(&self, f: F) -> Result<(), ChainStorageError>
-    where
-        Self: Sized,
-        F: FnMut(Result<(HashOutput, Block), ChainStorageError>);
+    // replace with 2 fn below. // fn for_each_orphan<F>(&self, f: F) -> Result<(), ChainStorageError>
+    // where
+    //     Self: Sized,
+    //     F: FnMut(Result<(HashOutput, Block), ChainStorageError>);
+    /// returns a list of orphan block headers that are parents to the named hash
+    fn fetch_parent_orphan_headers(&self, hash: HashOutput, height: u64)
+        -> Result<Vec<BlockHeader>, ChainStorageError>;
+    /// Returns a list of all orphan block headers
+    fn fetch_all_orphan_headers(&self) -> Result<Vec<BlockHeader>, ChainStorageError>;
     /// Returns the number of blocks in the block orphan pool.
     fn get_orphan_count(&self) -> Result<usize, ChainStorageError>;
     /// Performs the function F for each transaction kernel.
-    fn for_each_kernel<F>(&self, f: F) -> Result<(), ChainStorageError>
-    where
-        Self: Sized,
-        F: FnMut(Result<(HashOutput, TransactionKernel), ChainStorageError>);
+    // DELETE? not used// fn for_each_kernel<F>(&self, f: F) -> Result<(), ChainStorageError>
+    // where
+    //     Self: Sized,
+    //     F: FnMut(Result<(HashOutput, TransactionKernel), ChainStorageError>);
     /// Performs the function F for each block header.
-    fn for_each_header<F>(&self, f: F) -> Result<(), ChainStorageError>
-    where
-        Self: Sized,
-        F: FnMut(Result<(u64, BlockHeader), ChainStorageError>);
+    // DELETE? not used// fn for_each_header<F>(&self, f: F) -> Result<(), ChainStorageError>
+    // where
+    //     Self: Sized,
+    //     F: FnMut(Result<(u64, BlockHeader), ChainStorageError>);
     /// Performs the function F for each UTXO.
-    fn for_each_utxo<F>(&self, f: F) -> Result<(), ChainStorageError>
-    where
-        Self: Sized,
-        F: FnMut(Result<(HashOutput, TransactionOutput), ChainStorageError>);
-    /// Returns the stored header with the highest corresponding height.
+    // DELETE? not used// fn for_each_utxo<F>(&self, f: F) -> Result<(), ChainStorageError>
+    // where
+    //     Self: Sized,
+    //     F: FnMut(Result<(HashOutput, TransactionOutput), ChainStorageError>);
+    /// Returns the stored header with the highest corresponding height on the main chain.
     fn fetch_last_header(&self) -> Result<Option<BlockHeader>, ChainStorageError>;
     /// Returns the stored chain metadata.
     fn fetch_metadata(&self) -> Result<ChainMetadata, ChainStorageError>;
@@ -487,6 +504,8 @@ where T: BlockchainBackend
     /// If an error does occur while writing the new block parts, all changes are reverted before returning.
     pub fn add_block(&self, block: Block) -> Result<BlockAddResult, ChainStorageError> {
         // Perform orphan block validation.
+        // lets check orphan validation time
+        // Todo  move this down after exist check as this can be slow
         if let Err(e) = self.validators.orphan.validate(&block) {
             warn!(
                 target: LOG_TARGET,
@@ -497,7 +516,6 @@ where T: BlockchainBackend
             );
             return Err(e.into());
         }
-
         let mut db = self.db_write_access()?;
         let block_add_result = add_block(
             &mut db,
@@ -918,18 +936,6 @@ fn rewind_to_height<T: BlockchainBackend>(
     let accumulated_work =
         ProofOfWork::new_from_difficulty(&last_header.pow, ProofOfWork::achieved_difficulty(&last_header))
             .total_accumulated_difficulty();
-    txn.insert(DbKeyValuePair::Metadata(
-        MetadataKey::ChainHeight,
-        MetadataValue::ChainHeight(Some(last_header.height)),
-    ));
-    txn.insert(DbKeyValuePair::Metadata(
-        MetadataKey::BestBlock,
-        MetadataValue::BestBlock(Some(last_header.hash())),
-    ));
-    txn.insert(DbKeyValuePair::Metadata(
-        MetadataKey::AccumulatedWork,
-        MetadataValue::AccumulatedWork(Some(accumulated_work)),
-    ));
     commit(db, txn)?;
 
     Ok(removed_blocks)
@@ -1128,12 +1134,6 @@ fn reorganize_chain<T: BlockchainBackend>(
         orphan_hashes.push(block_hash.clone());
         validation_result = block_validator.validate(&block, db);
         if validation_result.is_err() {
-            warn!(
-                target: LOG_TARGET,
-                "Orphan block {} ({}) failed validation during chain reorg.",
-                block.header.height,
-                block_hash.to_hex(),
-            );
             remove_orphan(db, block.hash())?;
             break;
         }
