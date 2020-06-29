@@ -20,6 +20,9 @@
 //  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 //  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#[cfg(test)]
+mod test;
+
 mod config;
 pub use self::config::HorizonSyncConfig;
 
@@ -27,7 +30,7 @@ mod error;
 pub use error::HorizonSyncError;
 
 mod validators;
-pub use validators::{HorizonHeadersValidator, HorizonSyncValidators};
+pub use validators::{HorizonFinalStateValidator, HorizonHeadersValidator, HorizonSyncValidators};
 
 mod state_sync;
 pub use state_sync::HorizonStateSync;

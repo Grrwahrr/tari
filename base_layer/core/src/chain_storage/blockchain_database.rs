@@ -219,6 +219,11 @@ pub trait BlockchainBackend: Send + Sync {
         height: u64,
         block_window: usize,
     ) -> Result<Vec<(EpochTime, Difficulty)>, ChainStorageError>;
+
+    /// Returns the UTXO count
+    fn count_utxos(&self) -> Result<usize, ChainStorageError>;
+    /// Returns the kernel count
+    fn count_kernels(&self) -> Result<usize, ChainStorageError>;
 }
 
 // Private macro that pulls out all the boiler plate of extracting a DB query result from its variants
@@ -404,6 +409,34 @@ where T: BlockchainBackend
     pub fn fetch_utxo(&self, hash: HashOutput) -> Result<TransactionOutput, ChainStorageError> {
         let db = self.db_read_access()?;
         fetch_utxo(&*db, hash)
+    }
+
+    /// Returns all UTXOs
+    pub fn fetch_all_utxos(&self) -> Result<Vec<TransactionOutput>, ChainStorageError> {
+        let db = self.db_read_access()?;
+        let utxo_count = db.count_utxos()?;
+        let mut outputs = Vec::with_capacity(utxo_count);
+        db.for_each_utxo(|utxo| {
+            if let Ok((_, output)) = utxo {
+                outputs.push(output);
+            }
+        })?;
+
+        Ok(outputs)
+    }
+
+    /// Returns all kernels
+    pub fn fetch_all_kernels(&self) -> Result<Vec<TransactionKernel>, ChainStorageError> {
+        let db = self.db_read_access()?;
+        let kernel_count = db.count_kernels()?;
+        let mut kernels = Vec::with_capacity(kernel_count);
+        db.for_each_kernel(|kernel| {
+            if let Ok((_, kernel)) = kernel {
+                kernels.push(kernel);
+            }
+        })?;
+
+        Ok(kernels)
     }
 
     /// Store the provided UTXO.

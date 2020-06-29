@@ -450,7 +450,12 @@ pub async fn request_txos<B: BlockchainBackend + 'static>(
     let config = shared.config.sync_peer_config;
     for attempt in 1..=request_retry_attempts {
         let sync_peer = select_sync_peer(&config, sync_peers)?;
-        debug!(target: log_target, "Requesting kernels from {}.", sync_peer);
+        debug!(
+            target: log_target,
+            "Requesting {} kernels from {}.",
+            hashes.len(),
+            sync_peer
+        );
         match shared
             .comms
             .request_txos_from_peer(hashes.to_vec(), Some(sync_peer.clone()))

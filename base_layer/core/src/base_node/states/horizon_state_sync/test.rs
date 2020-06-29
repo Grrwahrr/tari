@@ -20,34 +20,28 @@
 //  WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE
 //  USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use super::validators::HeaderIter;
 use crate::{
-    base_node::{comms_interface::CommsInterfaceError, states::block_sync::BlockSyncError},
     chain_storage::ChainStorageError,
-    validation::ValidationError,
+    consensus::{ConsensusManagerBuilder, Network},
+    helpers::create_mem_db,
 };
-use thiserror::Error;
-use tokio::task;
+use tari_test_utils::unpack_enum;
 
-#[derive(Debug, Error)]
-pub enum HorizonSyncError {
-    #[error("Peer sent an empty response")]
-    EmptyResponse,
-    #[error("Peer sent an invalid response")]
-    IncorrectResponse,
-    #[error("Received invalid headers from peer: {0}")]
-    InvalidHeader(String),
-    #[error("Exceeded maximum sync attempts")]
-    MaxSyncAttemptsReached,
-    #[error("Chain storage error: {0:?}")]
-    ChainStorageError(#[from] ChainStorageError),
-    #[error("Comms interface error: {0:?}")]
-    CommsInterfaceError(#[from] CommsInterfaceError),
-    #[error("Block sync error: {0:?}")]
-    BlockSyncError(#[from] BlockSyncError),
-    #[error("Header validation failed: {0:?}")]
-    HeaderValidationFailed(ValidationError),
-    #[error("Final state validation failed: {0:?}")]
-    FinalStateValidationFailed(ValidationError),
-    #[error("Join error: {0}")]
-    JoinError(#[source] task::JoinError),
+#[test]
+fn header_iter_empty_and_invalid_height() {
+    let consensus_manager = ConsensusManagerBuilder::new(Network::LocalNet).build();
+    let db = create_mem_db(&consensus_manager);
+
+    let iter = HeaderIter::new(&db, 0, 10);
+    let headers = iter.map(Result::unwrap).collect::<Vec<_>>();
+    assert_eq!(headers.len(), 1);
+    let genesis = consensus_manager.get_genesis_block();
+    assert_eq!(&genesis.header, &headers[0]);
+
+    // Invalid header height
+    let iter = HeaderIter::new(&db, 1, 10);
+    let headers = iter.collect::<Vec<_>>();
+    assert_eq!(headers.len(), 1);
+    unpack_enum!(ChainStorageError::ValueNotFound(_k) = headers[0].as_ref().unwrap_err());
 }

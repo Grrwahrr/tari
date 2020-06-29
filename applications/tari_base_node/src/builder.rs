@@ -54,7 +54,7 @@ use tari_core::{
     base_node::{
         chain_metadata_service::{ChainMetadataHandle, ChainMetadataServiceInitializer},
         service::{BaseNodeServiceConfig, BaseNodeServiceInitializer},
-        states::{HorizonHeadersValidator, HorizonSyncValidators, StatusInfo},
+        states::{HorizonFinalStateValidator, HorizonHeadersValidator, HorizonSyncValidators, StatusInfo},
         BaseNodeStateMachine,
         BaseNodeStateMachineConfig,
         LocalNodeCommsInterface,
@@ -558,7 +558,7 @@ where
         &wallet_dht,
         &wallet_conn,
         wallet_subscriptions,
-        factories,
+        factories.clone(),
     )
     .await;
 
@@ -602,7 +602,10 @@ where
     let node_local_interface = base_node_handles
         .get_handle::<LocalNodeCommsInterface>()
         .expect("Problem getting node local interface handle.");
-    let horizon_sync_validators = HorizonSyncValidators::new(HorizonHeadersValidator::new(db.clone(), rules.clone()));
+    let horizon_sync_validators = HorizonSyncValidators::new(
+        HorizonHeadersValidator::new(db.clone(), rules.clone()),
+        HorizonFinalStateValidator::new(db.clone(), rules.clone(), factories.clone()),
+    );
     let node = BaseNodeStateMachine::new(
         &db,
         &node_local_interface,

@@ -280,7 +280,7 @@ impl<B: BlockchainBackend + 'static> HorizonStateSynchronization<'_, '_, B> {
                 )
                 .await?;
 
-                match self.validate_kernels(&kernel_hashes, &kernels) {
+                match self.validate_kernel_response(&kernel_hashes, &kernels) {
                     Ok(_) => {
                         async_db::insert_kernels(self.db(), kernels).await?;
                         trace!(
@@ -354,7 +354,7 @@ impl<B: BlockchainBackend + 'static> HorizonStateSynchronization<'_, '_, B> {
                     .await?;
                 let local_utxo_deleted = Bitmap::deserialize(&local_utxo_bitmap_bytes);
 
-                match self.validate_utxo_hashes(&remote_utxo_hashes, &local_utxo_hashes) {
+                match self.validate_utxo_hashes_response(&remote_utxo_hashes, &local_utxo_hashes) {
                     Ok(_) => {
                         trace!(
                             target: LOG_TARGET,
@@ -458,7 +458,7 @@ impl<B: BlockchainBackend + 'static> HorizonStateSynchronization<'_, '_, B> {
                 .await?;
 
                 let db = &self.shared.db;
-                match self.validate_utxos_and_rangeproofs(
+                match self.validate_utxo_and_rangeproof_response(
                     &utxo_hashes,
                     &rp_hashes,
                     &request_utxo_hashes,
@@ -531,13 +531,23 @@ impl<B: BlockchainBackend + 'static> HorizonStateSynchronization<'_, '_, B> {
         // TODO: Perform final validation on full synced horizon state before committing horizon state checkpoint.
         // TODO: Verify header and kernel set using Mmr Roots
 
+        let validator = self.shared.horizon_sync_validators.final_state.clone();
+        let horizon_sync_height = self.horizon_sync_height;
+        spawn_blocking(move || {
+            validator
+                .validate(&horizon_sync_height)
+                .map_err(HorizonSyncError::FinalStateValidationFailed)
+        })
+        .await
+        .map_err(HorizonSyncError::JoinError)??;
+
         async_db::commit_horizon_state(self.db()).await?;
 
         Ok(())
     }
 
     // Validate the received UTXO set and, UTXO and RangeProofs MMR nodes.
-    fn validate_utxos_and_rangeproofs(
+    fn validate_utxo_and_rangeproof_response(
         &self,
         utxo_hashes: &[HashOutput],
         rp_hashes: &[HashOutput],
@@ -572,7 +582,7 @@ impl<B: BlockchainBackend + 'static> HorizonStateSynchronization<'_, '_, B> {
     }
 
     // Validate the received UTXO set and, UTXO and RangeProofs MMR nodes.
-    fn validate_utxo_hashes(
+    fn validate_utxo_hashes_response(
         &self,
         local_utxo_hashes: &[HashOutput],
         remote_utxo_hashes: &[HashOutput],
@@ -592,7 +602,7 @@ impl<B: BlockchainBackend + 'static> HorizonStateSynchronization<'_, '_, B> {
     }
 
     // Check the received set of kernels.
-    fn validate_kernels(
+    fn validate_kernel_response(
         &self,
         kernel_hashes: &[HashOutput],
         kernels: &[TransactionKernel],
