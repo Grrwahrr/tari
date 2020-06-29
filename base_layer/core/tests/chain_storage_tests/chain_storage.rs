@@ -203,7 +203,7 @@ fn utxo_and_rp_merkle_root() {
     let consensus_manager = ConsensusManagerBuilder::new(network).with_block(gen_block).build();
     let store = create_mem_db(&consensus_manager);
     let factories = CryptoFactories::default();
-    let block0 = store.fetch_block(0).unwrap().block().clone();
+    let block0 = store.fetch_block_with_height(0).unwrap().block().clone();
 
     let utxo0 = block0.body.outputs()[0].clone();
     let (utxo1, _) = create_utxo(MicroTari(10_000), &factories, None);
@@ -236,7 +236,7 @@ fn kernel_merkle_root() {
     let network = Network::LocalNet;
     let consensus_manager = ConsensusManagerBuilder::new(network).build();
     let store = create_mem_db(&consensus_manager);
-    let block0 = store.fetch_block(0).unwrap().block().clone();
+    let block0 = store.fetch_block_with_height(0).unwrap().block().clone();
 
     let kernel1 = create_test_kernel(100.into(), 0);
     let kernel2 = create_test_kernel(200.into(), 0);
@@ -392,7 +392,7 @@ fn store_and_retrieve_block() {
     assert_eq!(metadata.best_block, Some(hash));
     assert_eq!(metadata.horizon_block(metadata.height_of_longest_chain.unwrap()), 0);
     // Fetch the block back
-    let block0 = db.fetch_block(0).unwrap();
+    let block0 = db.fetch_block_with_height(0).unwrap();
     assert_eq!(block0.confirmations(), 1);
     // Compare the blocks
     let block0 = Block::from(block0);
@@ -408,7 +408,7 @@ fn add_multiple_blocks() {
     let store = create_mem_db(&consensus_manager);
     let metadata = store.get_metadata().unwrap();
     assert_eq!(metadata.height_of_longest_chain, Some(0));
-    let block0 = store.fetch_block(0).unwrap().block().clone();
+    let block0 = store.fetch_block_with_height(0).unwrap().block().clone();
     assert_eq!(metadata.best_block, Some(block0.hash()));
     // Add another block
     let block1 = append_block(
@@ -450,10 +450,10 @@ fn test_checkpoints() {
     )
     .unwrap();
     // Get the checkpoint
-    let block_a = db.fetch_block(0).unwrap();
+    let block_a = db.fetch_block_with_height(0).unwrap();
     assert_eq!(block_a.confirmations(), 2);
     assert_eq!(blocks[0], Block::from(block_a));
-    let block_b = db.fetch_block(1).unwrap();
+    let block_b = db.fetch_block_with_height(1).unwrap();
     assert_eq!(block_b.confirmations(), 1);
     let block1 = serde_json::to_string(&block1).unwrap();
     let block_b = serde_json::to_string(&Block::from(block_b)).unwrap();
@@ -801,18 +801,18 @@ fn store_and_retrieve_blocks() {
     let db = MemoryDatabase::<HashDigest>::new(mmr_cache_config);
     let store = BlockchainDatabase::new(db, &rules, validators, BlockchainDatabaseConfig::default()).unwrap();
 
-    let block0 = store.fetch_block(0).unwrap().block().clone();
+    let block0 = store.fetch_block_with_height(0).unwrap().block().clone();
     let block1 = append_block(&store, &block0, vec![], &rules.consensus_constants(), 1.into()).unwrap();
     let block2 = append_block(&store, &block1, vec![], &rules.consensus_constants(), 1.into()).unwrap();
-    assert_eq!(*store.fetch_block(0).unwrap().block(), block0);
-    assert_eq!(*store.fetch_block(1).unwrap().block(), block1);
-    assert_eq!(*store.fetch_block(2).unwrap().block(), block2);
+    assert_eq!(*store.fetch_block_with_height(0).unwrap().block(), block0);
+    assert_eq!(*store.fetch_block_with_height(1).unwrap().block(), block1);
+    assert_eq!(*store.fetch_block_with_height(2).unwrap().block(), block2);
 
     let block3 = append_block(&store, &block2, vec![], &rules.consensus_constants(), 1.into()).unwrap();
-    assert_eq!(*store.fetch_block(0).unwrap().block(), block0);
-    assert_eq!(*store.fetch_block(1).unwrap().block(), block1);
-    assert_eq!(*store.fetch_block(2).unwrap().block(), block2);
-    assert_eq!(*store.fetch_block(3).unwrap().block(), block3);
+    assert_eq!(*store.fetch_block_with_height(0).unwrap().block(), block0);
+    assert_eq!(*store.fetch_block_with_height(1).unwrap().block(), block1);
+    assert_eq!(*store.fetch_block_with_height(2).unwrap().block(), block2);
+    assert_eq!(*store.fetch_block_with_height(3).unwrap().block(), block3);
 }
 
 #[test]
@@ -828,7 +828,7 @@ fn store_and_retrieve_chain_and_orphan_blocks_with_hashes() {
     let db = MemoryDatabase::<HashDigest>::new(mmr_cache_config);
     let store = BlockchainDatabase::new(db, &rules, validators, BlockchainDatabaseConfig::default()).unwrap();
 
-    let block0 = store.fetch_block(0).unwrap().block().clone();
+    let block0 = store.fetch_block_with_height(0).unwrap().block().clone();
     let block1 = append_block(&store, &block0, vec![], &rules.consensus_constants(), 1.into()).unwrap();
     let orphan = create_orphan_block(10, vec![], &rules.consensus_constants());
     let mut txn = DbTransaction::new();
@@ -935,8 +935,8 @@ fn invalid_block() {
         let rp_root0 = store.fetch_mmr_root(MmrTree::RangeProof).unwrap();
         assert_eq!(metadata.height_of_longest_chain, Some(0));
         assert_eq!(metadata.best_block, Some(block0_hash.clone()));
-        assert_eq!(store.fetch_block(0).unwrap().block().hash(), block0_hash);
-        assert!(store.fetch_block(1).is_err());
+        assert_eq!(store.fetch_block_with_height(0).unwrap().block().hash(), block0_hash);
+        assert!(store.fetch_block_with_height(1).is_err());
 
         // Block 1
         let txs = vec![txn_schema!(
@@ -963,9 +963,9 @@ fn invalid_block() {
         let rp_root1 = store.fetch_mmr_root(MmrTree::RangeProof).unwrap();
         assert_eq!(metadata.height_of_longest_chain, Some(1));
         assert_eq!(metadata.best_block, Some(block1_hash.clone()));
-        assert_eq!(store.fetch_block(0).unwrap().block().hash(), block0_hash);
-        assert_eq!(store.fetch_block(1).unwrap().block().hash(), block1_hash);
-        assert!(store.fetch_block(2).is_err());
+        assert_eq!(store.fetch_block_with_height(0).unwrap().block().hash(), block0_hash);
+        assert_eq!(store.fetch_block_with_height(1).unwrap().block().hash(), block1_hash);
+        assert!(store.fetch_block_with_height(2).is_err());
         assert_ne!(utxo_root0, utxo_root1);
         assert_ne!(kernel_root0, kernel_root1);
         assert_ne!(rp_root0, rp_root1);
@@ -991,9 +991,9 @@ fn invalid_block() {
         let rp_root2 = store.fetch_mmr_root(MmrTree::RangeProof).unwrap();
         assert_eq!(metadata.height_of_longest_chain, Some(1));
         assert_eq!(metadata.best_block, Some(block1_hash.clone()));
-        assert_eq!(store.fetch_block(0).unwrap().block().hash(), block0_hash);
-        assert_eq!(store.fetch_block(1).unwrap().block().hash(), block1_hash);
-        assert!(store.fetch_block(2).is_err());
+        assert_eq!(store.fetch_block_with_height(0).unwrap().block().hash(), block0_hash);
+        assert_eq!(store.fetch_block_with_height(1).unwrap().block().hash(), block1_hash);
+        assert!(store.fetch_block_with_height(2).is_err());
         assert_eq!(utxo_root1, utxo_root2);
         assert_eq!(kernel_root1, kernel_root2);
         assert_eq!(rp_root1, rp_root2);
@@ -1020,10 +1020,10 @@ fn invalid_block() {
         let rp_root2 = store.fetch_mmr_root(MmrTree::RangeProof).unwrap();
         assert_eq!(metadata.height_of_longest_chain, Some(2));
         assert_eq!(metadata.best_block, Some(block2_hash.clone()));
-        assert_eq!(store.fetch_block(0).unwrap().block().hash(), block0_hash);
-        assert_eq!(store.fetch_block(1).unwrap().block().hash(), block1_hash);
-        assert_eq!(store.fetch_block(2).unwrap().block().hash(), block2_hash);
-        assert!(store.fetch_block(3).is_err());
+        assert_eq!(store.fetch_block_with_height(0).unwrap().block().hash(), block0_hash);
+        assert_eq!(store.fetch_block_with_height(1).unwrap().block().hash(), block1_hash);
+        assert_eq!(store.fetch_block_with_height(2).unwrap().block().hash(), block2_hash);
+        assert!(store.fetch_block_with_height(3).is_err());
         assert_ne!(utxo_root1, utxo_root2);
         assert_ne!(kernel_root1, kernel_root2);
         assert_ne!(rp_root1, rp_root2);
@@ -1344,9 +1344,9 @@ fn pruned_mode_cleanup_and_fetch_block() {
     )
     .unwrap();
 
-    assert!(store.fetch_block(0).is_err()); // Genesis block cant be retrieved in pruned mode
-    assert_eq!(store.fetch_block(1).unwrap().block, block1);
-    assert_eq!(store.fetch_block(2).unwrap().block, block2);
+    assert!(store.fetch_block_with_height(0).is_err()); // Genesis block cant be retrieved in pruned mode
+    assert_eq!(store.fetch_block_with_height(1).unwrap().block, block1);
+    assert_eq!(store.fetch_block_with_height(2).unwrap().block, block2);
 
     let block4 = append_block(
         &store,
@@ -1358,11 +1358,11 @@ fn pruned_mode_cleanup_and_fetch_block() {
     .unwrap();
 
     // Adding block 4 will trigger the pruned mode cleanup, first block after horizon block height is retrievable.
-    assert!(store.fetch_block(0).is_err());
-    assert!(store.fetch_block(1).is_err());
-    assert!(store.fetch_block(2).is_err());
-    assert_eq!(store.fetch_block(3).unwrap().block, block3);
-    assert_eq!(store.fetch_block(4).unwrap().block, block4);
+    assert!(store.fetch_block_with_height(0).is_err());
+    assert!(store.fetch_block_with_height(1).is_err());
+    assert!(store.fetch_block_with_height(2).is_err());
+    assert_eq!(store.fetch_block_with_height(3).unwrap().block, block3);
+    assert_eq!(store.fetch_block_with_height(4).unwrap().block, block4);
 }
 
 #[test]

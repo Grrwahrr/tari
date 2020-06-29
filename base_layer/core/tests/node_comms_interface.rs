@@ -115,7 +115,7 @@ fn inbound_get_metadata() {
         consensus_manager,
         outbound_nci,
     );
-    let block = store.fetch_block(0).unwrap().block().clone();
+    let block = store.fetch_block_with_height(0).unwrap().block().clone();
 
     test_async(move |rt| {
         rt.spawn(async move {
@@ -171,10 +171,7 @@ fn inbound_fetch_kernels() {
 
     let kernel = create_test_kernel(5.into(), 0);
     let hash = kernel.hash();
-    let mut txn = DbTransaction::new();
-    txn.insert_kernel(kernel.clone());
-    assert!(store.commit(txn).is_ok());
-
+    assert!(store.add_kernels(kernel.clone()).is_ok());
     test_async(move |rt| {
         rt.spawn(async move {
             if let Ok(NodeCommsResponse::TransactionKernels(received_kernels)) = inbound_nch
@@ -229,7 +226,7 @@ fn inbound_fetch_headers() {
         consensus_manager,
         outbound_nci,
     );
-    let header = store.fetch_block(0).unwrap().block().header.clone();
+    let header = store.fetch_block_with_height(0).unwrap().block().header.clone();
 
     test_async(move |rt| {
         rt.spawn(async move {
@@ -349,7 +346,7 @@ fn inbound_fetch_blocks() {
         consensus_manager,
         outbound_nci,
     );
-    let block = store.fetch_block(0).unwrap().block().clone();
+    let block = store.fetch_block_with_height(0).unwrap().block().clone();
 
     test_async(move |rt| {
         rt.spawn(async move {

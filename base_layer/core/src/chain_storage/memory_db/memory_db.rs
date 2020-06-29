@@ -26,16 +26,7 @@ use crate::{
     blocks::{blockheader::BlockHash, Block, BlockHeader},
     chain_storage::{
         blockchain_database::BlockchainBackend,
-        db_transaction::{
-            DbKey,
-            DbKeyValuePair,
-            DbTransaction,
-            DbValue,
-            MetadataKey,
-            MetadataValue,
-            MmrTree,
-            WriteOperation,
-        },
+        db_transaction::{DbKey, DbValue, MetadataKey, MetadataValue, MmrTree},
         error::ChainStorageError,
         memory_db::MemDbVec,
         ChainMetadata,
@@ -117,7 +108,7 @@ where D: Digest + Send + Sync
 
     // This will reconstruct the blocks and returns a copy
     fn reconstruct_block(&self, height: u64) -> Result<Block, ChainStorageError> {
-        let mut db = self
+        let db = self
             .db
             .read()
             .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
@@ -147,12 +138,12 @@ where D: Digest + Send + Sync
             .iter()
             .map(|pos| {
                 self.fetch_mmr_nodes(MmrTree::Utxo, pos, 1).and_then(|node| {
-                    let (hash, deleted) = node[0];
+                    let (hash, deleted) = &node[0];
                     assert!(deleted);
                     let val: TransactionOutput = db
                         .stxos
-                        .get(&hash)
-                        .ok_or_else(|| ChainStorageError::ValueNotFound(DbKey::SpentOutput(hash)))?
+                        .get(hash)
+                        .ok_or_else(|| ChainStorageError::ValueNotFound(DbKey::SpentOutput(hash.clone())))?
                         .value
                         .clone();
                     Ok(TransactionInput::from(val))
@@ -282,133 +273,133 @@ where D: Digest + Send + Sync
         Ok(())
     }
 
-    fn write(&mut self, tx: DbTransaction) -> Result<(), ChainStorageError> {
-        if tx.operations.is_empty() {
-            return Ok(());
-        }
+    // fn write(&mut self, tx: DbTransaction) -> Result<(), ChainStorageError> {
+    //     if tx.operations.is_empty() {
+    //         return Ok(());
+    //     }
 
-        let mut db = self
-            .db
-            .write()
-            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
-        // Not **really** atomic, but..
-        // Hashmap insertions don't typically fail and b) MemoryDB should not be used for production anyway.
-        for op in tx.operations.into_iter() {
-            match op {
-                WriteOperation::Insert(insert) => match insert {
-                    DbKeyValuePair::Metadata(k, v) => {
-                        let key = k as u32;
-                        db.metadata.insert(key, v);
-                    },
-                },
-                WriteOperation::Delete(delete) => match delete {
-                    DbKey::Metadata(_) => {}, // no-op
-                    DbKey::BlockHeader(k) => {
-                        db.headers.remove(&k).and_then(|v| db.block_hashes.remove(&v.hash()));
-                    },
-                    DbKey::BlockHash(hash) => {
-                        db.block_hashes.remove(&hash).and_then(|i| db.headers.remove(&i));
-                    },
-                    DbKey::UnspentOutput(k) => {
-                        db.utxos.remove(&k);
-                    },
-                    DbKey::SpentOutput(k) => {
-                        db.stxos.remove(&k);
-                    },
-                    DbKey::TransactionKernel(k) => {
-                        db.kernels.remove(&k);
-                    },
-                    DbKey::OrphanBlock(k) => {
-                        db.orphans.remove(&k);
-                    },
-                },
-                WriteOperation::UnSpend(key) => match key {
-                    DbKey::SpentOutput(hash) => {
-                        let moved = unspend_stxo(&mut db, hash);
-                        if !moved {
-                            return Err(ChainStorageError::UnspendError);
-                        }
-                    },
-                    _ => return Err(ChainStorageError::InvalidOperation("Only STXOs can be unspent".into())),
-                },
-                WriteOperation::CreateMmrCheckpoint(tree) => match tree {
-                    MmrTree::Kernel => {
-                        let curr_checkpoint = db.curr_kernel_checkpoint.clone();
-                        db.kernel_checkpoints.push(curr_checkpoint)?;
-                        db.curr_kernel_checkpoint.reset();
+    //     let mut db = self
+    //         .db
+    //         .write()
+    //         .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+    //     // Not **really** atomic, but..
+    //     // Hashmap insertions don't typically fail and b) MemoryDB should not be used for production anyway.
+    //     for op in tx.operations.into_iter() {
+    //         match op {
+    //             WriteOperation::Insert(insert) => match insert {
+    //                 DbKeyValuePair::Metadata(k, v) => {
+    //                     let key = k as u32;
+    //                     db.metadata.insert(key, v);
+    //                 },
+    //             },
+    //             WriteOperation::Delete(delete) => match delete {
+    //                 DbKey::Metadata(_) => {}, // no-op
+    //                 DbKey::BlockHeader(k) => {
+    //                     db.headers.remove(&k).and_then(|v| db.block_hashes.remove(&v.hash()));
+    //                 },
+    //                 DbKey::BlockHash(hash) => {
+    //                     db.block_hashes.remove(&hash).and_then(|i| db.headers.remove(&i));
+    //                 },
+    //                 DbKey::UnspentOutput(k) => {
+    //                     db.utxos.remove(&k);
+    //                 },
+    //                 DbKey::SpentOutput(k) => {
+    //                     db.stxos.remove(&k);
+    //                 },
+    //                 DbKey::TransactionKernel(k) => {
+    //                     db.kernels.remove(&k);
+    //                 },
+    //                 DbKey::OrphanBlock(k) => {
+    //                     db.orphans.remove(&k);
+    //                 },
+    //             },
+    //             WriteOperation::UnSpend(key) => match key {
+    //                 DbKey::SpentOutput(hash) => {
+    //                     let moved = unspend_stxo(&mut db, hash);
+    //                     if !moved {
+    //                         return Err(ChainStorageError::UnspendError);
+    //                     }
+    //                 },
+    //                 _ => return Err(ChainStorageError::InvalidOperation("Only STXOs can be unspent".into())),
+    //             },
+    //             WriteOperation::CreateMmrCheckpoint(tree) => match tree {
+    //                 MmrTree::Kernel => {
+    //                     let curr_checkpoint = db.curr_kernel_checkpoint.clone();
+    //                     db.kernel_checkpoints.push(curr_checkpoint)?;
+    //                     db.curr_kernel_checkpoint.reset();
 
-                        db.kernel_mmr
-                            .update()
-                            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?
-                    },
-                    MmrTree::Utxo => {
-                        let curr_checkpoint = db.curr_utxo_checkpoint.clone();
-                        db.utxo_checkpoints.push(curr_checkpoint)?;
-                        db.curr_utxo_checkpoint.reset();
+    //                     db.kernel_mmr
+    //                         .update()
+    //                         .map_err(|e| ChainStorageError::AccessError(e.to_string()))?
+    //                 },
+    //                 MmrTree::Utxo => {
+    //                     let curr_checkpoint = db.curr_utxo_checkpoint.clone();
+    //                     db.utxo_checkpoints.push(curr_checkpoint)?;
+    //                     db.curr_utxo_checkpoint.reset();
 
-                        db.utxo_mmr
-                            .update()
-                            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?
-                    },
-                    MmrTree::RangeProof => {
-                        let curr_checkpoint = db.curr_range_proof_checkpoint.clone();
-                        db.range_proof_checkpoints.push(curr_checkpoint)?;
-                        db.curr_range_proof_checkpoint.reset();
+    //                     db.utxo_mmr
+    //                         .update()
+    //                         .map_err(|e| ChainStorageError::AccessError(e.to_string()))?
+    //                 },
+    //                 MmrTree::RangeProof => {
+    //                     let curr_checkpoint = db.curr_range_proof_checkpoint.clone();
+    //                     db.range_proof_checkpoints.push(curr_checkpoint)?;
+    //                     db.curr_range_proof_checkpoint.reset();
 
-                        db.range_proof_mmr
-                            .update()
-                            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?
-                    },
-                },
-                WriteOperation::RewindMmr(tree, steps_back) => match tree {
-                    MmrTree::Kernel => {
-                        let last_cp = rewind_checkpoints(&mut db.kernel_checkpoints, steps_back)?;
-                        db.kernel_mmr
-                            .update()
-                            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
-                        db.curr_kernel_checkpoint.reset_to(&last_cp);
-                    },
-                    MmrTree::Utxo => {
-                        let last_cp = rewind_checkpoints(&mut db.utxo_checkpoints, steps_back)?;
-                        db.utxo_mmr
-                            .update()
-                            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
-                        db.curr_utxo_checkpoint.reset_to(&last_cp);
-                    },
-                    MmrTree::RangeProof => {
-                        let last_cp = rewind_checkpoints(&mut db.range_proof_checkpoints, steps_back)?;
-                        db.range_proof_mmr
-                            .update()
-                            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
-                        db.curr_range_proof_checkpoint.reset_to(&last_cp);
-                    },
-                },
-                WriteOperation::MergeMmrCheckpoints(tree, max_cp_count) => match tree {
-                    MmrTree::Kernel => {
-                        let (num_cps_merged, _) = merge_checkpoints(&mut db.kernel_checkpoints, max_cp_count)?;
-                        db.kernel_mmr
-                            .checkpoints_merged(num_cps_merged)
-                            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
-                    },
-                    MmrTree::Utxo => {
-                        let (num_cps_merged, stxo_leaf_indices) =
-                            merge_checkpoints(&mut db.utxo_checkpoints, max_cp_count)?;
-                        db.utxo_mmr
-                            .checkpoints_merged(num_cps_merged)
-                            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
-                        discard_stxos(&mut db, stxo_leaf_indices)?;
-                    },
-                    MmrTree::RangeProof => {
-                        let (num_cps_merged, _) = merge_checkpoints(&mut db.range_proof_checkpoints, max_cp_count)?;
-                        db.range_proof_mmr
-                            .checkpoints_merged(num_cps_merged)
-                            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
-                    },
-                },
-            }
-        }
-        Ok(())
-    }
+    //                     db.range_proof_mmr
+    //                         .update()
+    //                         .map_err(|e| ChainStorageError::AccessError(e.to_string()))?
+    //                 },
+    //             },
+    //             WriteOperation::RewindMmr(tree, steps_back) => match tree {
+    //                 MmrTree::Kernel => {
+    //                     let last_cp = rewind_checkpoints(&mut db.kernel_checkpoints, steps_back)?;
+    //                     db.kernel_mmr
+    //                         .update()
+    //                         .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+    //                     db.curr_kernel_checkpoint.reset_to(&last_cp);
+    //                 },
+    //                 MmrTree::Utxo => {
+    //                     let last_cp = rewind_checkpoints(&mut db.utxo_checkpoints, steps_back)?;
+    //                     db.utxo_mmr
+    //                         .update()
+    //                         .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+    //                     db.curr_utxo_checkpoint.reset_to(&last_cp);
+    //                 },
+    //                 MmrTree::RangeProof => {
+    //                     let last_cp = rewind_checkpoints(&mut db.range_proof_checkpoints, steps_back)?;
+    //                     db.range_proof_mmr
+    //                         .update()
+    //                         .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+    //                     db.curr_range_proof_checkpoint.reset_to(&last_cp);
+    //                 },
+    //             },
+    //             WriteOperation::MergeMmrCheckpoints(tree, max_cp_count) => match tree {
+    //                 MmrTree::Kernel => {
+    //                     let (num_cps_merged, _) = merge_checkpoints(&mut db.kernel_checkpoints, max_cp_count)?;
+    //                     db.kernel_mmr
+    //                         .checkpoints_merged(num_cps_merged)
+    //                         .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+    //                 },
+    //                 MmrTree::Utxo => {
+    //                     let (num_cps_merged, stxo_leaf_indices) =
+    //                         merge_checkpoints(&mut db.utxo_checkpoints, max_cp_count)?;
+    //                     db.utxo_mmr
+    //                         .checkpoints_merged(num_cps_merged)
+    //                         .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+    //                     discard_stxos(&mut db, stxo_leaf_indices)?;
+    //                 },
+    //                 MmrTree::RangeProof => {
+    //                     let (num_cps_merged, _) = merge_checkpoints(&mut db.range_proof_checkpoints, max_cp_count)?;
+    //                     db.range_proof_mmr
+    //                         .checkpoints_merged(num_cps_merged)
+    //                         .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+    //                 },
+    //             },
+    //         }
+    //     }
+    //     Ok(())
+    // }
 
     fn fetch_checkpoint(&self, tree: MmrTree, height: u64) -> Result<MerkleCheckPoint, ChainStorageError> {
         let db = self.db_access()?;
@@ -447,7 +438,7 @@ where D: Digest + Send + Sync
             .get(&block_hash)
             .ok_or_else(|| ChainStorageError::ValueNotFound(DbKey::OrphanBlock(block_hash)))?;
 
-        let (header, inputs, outputs, kernels) = block.dissolve();
+        let (header, inputs, outputs, kernels) = block.clone().dissolve();
         // insert headers
         let k = header.height;
         if db.headers.contains_key(&k) {
@@ -503,7 +494,7 @@ where D: Digest + Send + Sync
 
     // rewinds the database to the specified height. It will move every block that was rewound to the orphan pool
     fn rewind_to_height(&mut self, height: u64) -> Result<Vec<BlockHeader>, ChainStorageError> {
-        let headers: Vec<BlockHeader> = Vec::new();
+        let mut headers: Vec<BlockHeader> = Vec::new();
         let mut db = self
             .db
             .write()
@@ -517,7 +508,7 @@ where D: Digest + Send + Sync
             let orphaned_block = self.reconstruct_block(rewind_height)?; // fetch_block(&**db, rewind_height)?.block().clone();
                                                                          // 1st we add the removed block back to the orphan pool.
             let hash = orphaned_block.hash();
-            db.orphans.insert(hash, orphaned_block);
+            db.orphans.insert(hash.clone(), orphaned_block);
             removed_blocks.push(hash);
 
             // Now we need to remove that block
@@ -528,9 +519,12 @@ where D: Digest + Send + Sync
             });
 
             // lets get the checkpoint
-            let hashes = self.fetch_checkpoint(MmrTree::Kernel, rewind_height)?.nodes_added();
+            let hashes = self
+                .fetch_checkpoint(MmrTree::Kernel, rewind_height)?
+                .nodes_added()
+                .clone();
             for hash in hashes {
-                db.kernels.remove(hash);
+                db.kernels.remove(&hash);
             }
             // Remove UTXOs and move STXOs back to UTXO set
             let (nodes_added, nodes_deleted) = self.fetch_checkpoint(MmrTree::Utxo, rewind_height)?.into_parts();
@@ -540,10 +534,10 @@ where D: Digest + Send + Sync
             // lets unspend utxos
             for pos in nodes_deleted.iter() {
                 self.fetch_mmr_nodes(MmrTree::Utxo, pos, 1).and_then(|nodes| {
-                    let (stxo_hash, deleted) = nodes[0];
+                    let (stxo_hash, deleted) = &nodes[0];
                     assert!(deleted);
 
-                    unspend_stxo(&mut db, stxo_hash);
+                    unspend_stxo(&mut db, stxo_hash.clone());
                     Ok(())
                 })?;
             }
@@ -679,6 +673,7 @@ where D: Digest + Send + Sync
             DbKey::SpentOutput(k) => db.stxos.contains_key(k),
             DbKey::TransactionKernel(k) => db.kernels.contains_key(k),
             DbKey::OrphanBlock(k) => db.orphans.contains_key(k),
+            DbKey::Block(k) => db.headers.contains_key(k),
         };
         Ok(result)
     }

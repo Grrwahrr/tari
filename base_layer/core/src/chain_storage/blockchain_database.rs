@@ -851,9 +851,9 @@ fn fetch_inputs<T: BlockchainBackend>(
         .map(|pos| {
             db.fetch_mmr_nodes(MmrTree::Utxo, pos, 1)
                 .and_then(|node| {
-                    let (hash, deleted) = node[0];
+                    let (hash, deleted) = &node[0];
                     assert!(deleted);
-                    fetch_stxo(db, hash)
+                    fetch_stxo(db, hash.clone())
                 })
                 .and_then(|stxo| Ok(TransactionInput::from(stxo)))
         })
@@ -1096,7 +1096,7 @@ fn reorganize_chain<T: BlockchainBackend>(
 {
     let removed_blocks_headers = db.rewind_to_height(height)?;
     let mut removed_blocks = Vec::new();
-    for header in removed_blocks_headers {
+    for header in &removed_blocks_headers {
         removed_blocks.push(fetch_orphan(&**db, header.hash())?);
     }
 
@@ -1272,7 +1272,7 @@ fn find_orphan_chain_tips<T: BlockchainBackend>(db: &T, parent_height: u64, pare
     let mut tip_hashes = Vec::<BlockHash>::new();
     let mut parents = Vec::<(BlockHash, u64)>::new();
     let parents_headers = db
-        .fetch_parent_orphan_headers(parent_hash, parent_height)
+        .fetch_parent_orphan_headers(parent_hash.clone(), parent_height)
         .unwrap_or(Vec::new());
     for header in parents_headers {
         parents.push((header.hash(), header.height));
@@ -1284,7 +1284,7 @@ fn find_orphan_chain_tips<T: BlockchainBackend>(db: &T, parent_height: u64, pare
         if !orphan_chain_tips.is_empty() {
             tip_hashes.append(&mut orphan_chain_tips);
         } else {
-            tip_hashes.push(parent_hash);
+            tip_hashes.push(parent_hash.clone());
         }
     }
     if tip_hashes.is_empty() {

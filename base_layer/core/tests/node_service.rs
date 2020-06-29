@@ -629,7 +629,7 @@ fn local_get_metadata() {
     let (mut node, consensus_manager) =
         BaseNodeBuilder::new(network).start(&mut runtime, temp_dir.path().to_str().unwrap());
     let db = &node.blockchain_db;
-    let block0 = db.fetch_block(0).unwrap().block().clone();
+    let block0 = db.fetch_block_with_height(0).unwrap().block().clone();
     let block1 = append_block(db, &block0, vec![], &consensus_manager.consensus_constants(), 1.into()).unwrap();
     let block2 = append_block(db, &block1, vec![], &consensus_manager.consensus_constants(), 1.into()).unwrap();
 
@@ -695,7 +695,7 @@ fn local_get_target_difficulty() {
         BaseNodeBuilder::new(network).start(&mut runtime, temp_dir.path().to_str().unwrap());
 
     let db = &node.blockchain_db;
-    let block0 = db.fetch_block(0).unwrap().block().clone();
+    let block0 = db.fetch_block_with_height(0).unwrap().block().clone();
     assert_eq!(node.blockchain_db.get_height(), Ok(Some(0)));
 
     runtime.block_on(async {
@@ -740,7 +740,7 @@ fn local_submit_block() {
 
     let db = &node.blockchain_db;
     let event_stream = node.local_nci.get_block_event_stream_fused();
-    let block0 = db.fetch_block(0).unwrap().block().clone();
+    let block0 = db.fetch_block_with_height(0).unwrap().block().clone();
     let block1 = db
         .calculate_mmr_roots(chain_block(&block0, vec![], &consensus_manager.consensus_constants()))
         .unwrap();
