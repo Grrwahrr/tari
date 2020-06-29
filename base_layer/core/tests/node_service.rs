@@ -119,19 +119,13 @@ fn request_and_response_fetch_headers() {
     headerb1.height = 1;
     let mut headerb2 = BlockHeader::new(0);
     headerb2.height = 2;
-    let mut txn = DbTransaction::new();
-    txn.insert_header(headerb1.clone());
-    txn.insert_header(headerb2.clone());
-    assert!(bob_node.blockchain_db.commit(txn).is_ok());
+    assert!(bob_node.blockchain_db.add_headers(vec![headerb1, headerb2]).is_ok());
 
     let mut headerc1 = BlockHeader::new(0);
     headerc1.height = 1;
     let mut headerc2 = BlockHeader::new(0);
     headerc2.height = 2;
-    let mut txn = DbTransaction::new();
-    txn.insert_header(headerc1.clone());
-    txn.insert_header(headerc2.clone());
-    assert!(carol_node.blockchain_db.commit(txn).is_ok());
+    assert!(carol_node.blockchain_db.add_headers(vec![headerc1, headerc2]).is_ok());
 
     // The request is sent to a random remote base node so the returned headers can be from bob or carol
     runtime.block_on(async {
@@ -164,10 +158,7 @@ fn request_and_response_fetch_headers_with_hashes() {
     let header2 = BlockHeader::from_previous(&header1);
     let hash1 = header1.hash();
     let hash2 = header2.hash();
-    let mut txn = DbTransaction::new();
-    txn.insert_header(header1.clone());
-    txn.insert_header(header2.clone());
-    assert!(bob_node.blockchain_db.commit(txn).is_ok());
+    assert!(bob_node.blockchain_db.add_headers(vec![header1, header2]).is_ok());
 
     runtime.block_on(async {
         let received_headers = alice_node

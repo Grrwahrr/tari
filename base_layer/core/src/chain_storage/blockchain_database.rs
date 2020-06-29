@@ -136,7 +136,8 @@ pub trait BlockchainBackend: Send + Sync {
     /// block.
     fn add_orphan_block(&mut self, block: Block) -> Result<(), ChainStorageError>;
     /// This function will move a block from the orphan pool to the main chain. It assumes that the block has passed
-    /// full stateful validation
+    /// full stateful validation. It will spend all inputs and store utxo, headers and kernels. It will also update the
+    /// mmr's
     fn accept_block(&mut self, block_hash: HashOutput) -> Result<(), ChainStorageError>;
     // rewinds the database to the specified height. It will move every block that was rewound to the orphan pool
     // This will return the hashes of every block that was moved to the orphan pool
@@ -595,6 +596,40 @@ where T: BlockchainBackend
     pub fn rewind_to_height(&self, height: u64) -> Result<Vec<BlockHeader>, ChainStorageError> {
         let mut db = self.db_write_access()?;
         db.rewind_to_height(height)
+    }
+
+    /// This is used when synchronising. Adds in the list of headers provided to the main chain
+    pub fn add_block_headers(&mut self, headers: Vec<BlockHeader>) -> Result<(), ChainStorageError> {
+        let mut db = self.db_write_access()?;
+        db.add_block_headers(headers)
+    }
+
+    /// This is used when synchronising. Adds in the list of kernels provided to the main chain
+    pub fn add_kernels(&mut self, kernels: Vec<TransactionKernel>) -> Result<(), ChainStorageError> {
+        let mut db = self.db_write_access()?;
+        db.add_kernels(kernels)
+    }
+
+    /// This is used when synchronising. Adds in the list of utxos provided to the main chain
+    pub fn add_utxos(&mut self, utxos: Vec<TransactionOutput>) -> Result<(), ChainStorageError> {
+        let mut db = self.db_write_access()?;
+        db.add_utxos(utxos)
+    }
+
+    /// This is used when synchronising. Adds in the list of utxos provided to the main chain
+    pub fn add_orphan_block(&mut self, orphan: Block) -> Result<(), ChainStorageError> {
+        if let Err(e) = self.validators.orphan.validate(&orphan) {
+            warn!(
+                target: LOG_TARGET,
+                "Block #{} ({}) failed validation - {}",
+                orphan.header.height,
+                orphan.hash().to_hex(),
+                e.to_string()
+            );
+            return Err(e.into());
+        }
+        let mut db = self.db_write_access()?;
+        db.add_orphan_block(orphan)
     }
 }
 

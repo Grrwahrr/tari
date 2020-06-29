@@ -36,7 +36,6 @@ use tari_core::{
         BlockchainDatabase,
         BlockchainDatabaseConfig,
         ChainMetadata,
-        DbTransaction,
         HistoricalBlock,
         MemoryDatabase,
         Validators,
@@ -287,9 +286,7 @@ fn inbound_fetch_utxos() {
 
     let (utxo, _) = create_utxo(MicroTari(10_000), &factories, None);
     let hash = utxo.hash();
-    let mut txn = DbTransaction::new();
-    txn.insert_utxo(utxo.clone());
-    assert!(store.commit(txn).is_ok());
+    assert!(store.add_utxos(vec![utxo]).is_ok());
 
     test_async(move |rt| {
         rt.spawn(async move {
