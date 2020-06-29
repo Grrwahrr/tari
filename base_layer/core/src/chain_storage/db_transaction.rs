@@ -67,45 +67,45 @@ impl DbTransaction {
     }
 
     /// A general insert request. There are convenience functions for specific insert queries.
-    pub fn insert(&mut self, insert: DbKeyValuePair) {
-        self.operations.push(WriteOperation::Insert(insert));
-    }
+    // pub fn insert(&mut self, insert: DbKeyValuePair) {
+    //     self.operations.push(WriteOperation::Insert(insert));
+    // }
 
-    /// A general insert request. There are convenience functions for specific delete queries.
-    pub fn delete(&mut self, delete: DbKey) {
-        self.operations.push(WriteOperation::Delete(delete));
-    }
+    // /// A general insert request. There are convenience functions for specific delete queries.
+    // pub fn delete(&mut self, delete: DbKey) {
+    //     self.operations.push(WriteOperation::Delete(delete));
+    // }
 
     /// Inserts a transaction kernel into the current transaction.
-    pub fn insert_kernel(&mut self, kernel: TransactionKernel) {
-        let hash = kernel.hash();
-        self.insert(DbKeyValuePair::TransactionKernel(hash, Box::new(kernel)));
-    }
+    // pub fn insert_kernel(&mut self, kernel: TransactionKernel) {
+    //     let hash = kernel.hash();
+    //     self.insert(DbKeyValuePair::TransactionKernel(hash, Box::new(kernel)));
+    // }
 
-    /// Inserts a block header into the current transaction.
-    pub fn insert_header(&mut self, header: BlockHeader) {
-        let height = header.height;
-        self.insert(DbKeyValuePair::BlockHeader(height, Box::new(header)));
-    }
+    // /// Inserts a block header into the current transaction.
+    // pub fn insert_header(&mut self, header: BlockHeader) {
+    //     let height = header.height;
+    //     self.insert(DbKeyValuePair::BlockHeader(height, Box::new(header)));
+    // }
 
-    /// Adds a UTXO into the current transaction and update the TXO MMR.
-    pub fn insert_utxo(&mut self, utxo: TransactionOutput) {
-        let hash = utxo.hash();
-        self.insert(DbKeyValuePair::UnspentOutput(hash, Box::new(utxo)));
-    }
+    // /// Adds a UTXO into the current transaction and update the TXO MMR.
+    // pub fn insert_utxo(&mut self, utxo: TransactionOutput) {
+    //     let hash = utxo.hash();
+    //     self.insert(DbKeyValuePair::UnspentOutput(hash, Box::new(utxo)));
+    // }
 
-    /// Adds a UTXO into the current transaction and update the TXO MMR. This is a test only function used to ensure we
-    /// block duplicate entries. This function does not calculate the hash function but accepts one as a variable.
-    pub fn insert_utxo_with_hash(&mut self, hash: Vec<u8>, utxo: TransactionOutput) {
-        self.insert(DbKeyValuePair::UnspentOutput(hash, Box::new(utxo)));
-    }
+    // /// Adds a UTXO into the current transaction and update the TXO MMR. This is a test only function used to ensure
+    // we /// block duplicate entries. This function does not calculate the hash function but accepts one as a
+    // variable. pub fn insert_utxo_with_hash(&mut self, hash: Vec<u8>, utxo: TransactionOutput) {
+    //     self.insert(DbKeyValuePair::UnspentOutput(hash, Box::new(utxo)));
+    // }
 
-    /// Stores an orphan block. No checks are made as to whether this is actually an orphan. That responsibility lies
-    /// with the calling function.
-    pub fn insert_orphan(&mut self, orphan: Block) {
-        let hash = orphan.hash();
-        self.insert(DbKeyValuePair::OrphanBlock(hash, Box::new(orphan)));
-    }
+    // /// Stores an orphan block. No checks are made as to whether this is actually an orphan. That responsibility lies
+    // /// with the calling function.
+    // pub fn insert_orphan(&mut self, orphan: Block) {
+    //     let hash = orphan.hash();
+    //     self.insert(DbKeyValuePair::OrphanBlock(hash, Box::new(orphan)));
+    // }
 
     /// Moves a UTXO to the STXO set and mark it as spent on the MRR. If the UTXO is not in the UTXO set, the
     /// transaction will fail with an `UnspendableOutput` error.

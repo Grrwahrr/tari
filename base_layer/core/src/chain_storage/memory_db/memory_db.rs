@@ -61,7 +61,6 @@ use tari_mmr::{
     Hash as MmrHash,
     Hash,
     MerkleCheckPoint,
-    MerkleProof,
     MmrCache,
     MmrCacheConfig,
 };
@@ -503,8 +502,8 @@ where D: Digest + Send + Sync
     }
 
     // rewinds the database to the specified height. It will move every block that was rewound to the orphan pool
-    fn rewind_to_height(&mut self, height: u64) -> Result<(Vec<BlockHash>), ChainStorageError> {
-        let hashes: Vec<BlockHash> = Vec::new();
+    fn rewind_to_height(&mut self, height: u64) -> Result<Vec<BlockHeader>, ChainStorageError> {
+        let headers: Vec<BlockHeader> = Vec::new();
         let mut db = self
             .db
             .write()
@@ -523,9 +522,10 @@ where D: Digest + Send + Sync
 
             // Now we need to remove that block
             // Remove Header and block hash
-            db.headers
-                .remove(&rewind_height)
-                .and_then(|v| db.block_hashes.remove(&v.hash()));
+            db.headers.remove(&rewind_height).and_then(|v| {
+                headers.push(v.clone());
+                db.block_hashes.remove(&v.hash())
+            });
 
             // lets get the checkpoint
             let hashes = self.fetch_checkpoint(MmrTree::Kernel, rewind_height)?.nodes_added();
@@ -549,7 +549,7 @@ where D: Digest + Send + Sync
             }
         }
         MemoryDatabase::rewind_mmrs(&mut db, steps_back)?;
-        Ok(hashes)
+        Ok(headers)
     }
 
     /// This is used when synchronising. Adds in the list of headers provided to the main chain

@@ -75,7 +75,6 @@ use tari_mmr::{
     Hash as MmrHash,
     Hash,
     MerkleCheckPoint,
-    MerkleProof,
     MmrCache,
     MmrCacheConfig,
 };
@@ -651,7 +650,7 @@ where D: Digest + Send + Sync
     }
 
     // rewinds the database to the specified height. It will move every block that was rewound to the orphan pool
-    fn rewind_to_height(&mut self, height: u64) -> Result<(Vec<BlockHash>), ChainStorageError> {
+    fn rewind_to_height(&mut self, height: u64) -> Result<Vec<BlockHeader>, ChainStorageError> {
         let hashes: Vec<BlockHash> = Vec::new();
         let txn = WriteTransaction::new(self.env.clone()).map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
         let chain_height = self.mem_metadata.height_of_longest_chain.unwrap_or(0);
@@ -664,7 +663,7 @@ where D: Digest + Send + Sync
                                                                          // 1st we add the removed block back to the orphan pool.
             let hash = orphaned_block.hash();
             lmdb_insert(&txn, &self.orphans_db, &hash, &orphaned_block)?;
-            removed_blocks.push(hash);
+            removed_blocks.push(orphaned_block.header.clone());
 
             // Now we need to remove that block
             // Remove Header and block hash
