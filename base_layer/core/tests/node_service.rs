@@ -51,7 +51,7 @@ use tari_core::{
         service::BaseNodeServiceConfig,
     },
     blocks::BlockHeader,
-    chain_storage::{BlockAddResult, DbTransaction, MmrTree},
+    chain_storage::{BlockAddResult, MmrTree},
     consensus::{ConsensusConstantsBuilder, ConsensusManagerBuilder, Network},
     mempool::MempoolServiceConfig,
     proof_of_work::{Difficulty, PowAlgorithm},
@@ -194,14 +194,14 @@ fn request_and_response_fetch_kernels() {
     let hash1 = kernel1.hash();
     let hash2 = kernel2.hash();
 
-    let mut txn = DbTransaction::new();
-    txn.insert_kernel(kernel1.clone());
-    txn.insert_kernel(kernel2.clone());
-    assert!(bob_node.blockchain_db.commit(txn).is_ok());
-    let mut txn = DbTransaction::new();
-    txn.insert_kernel(kernel1.clone());
-    txn.insert_kernel(kernel2.clone());
-    assert!(carol_node.blockchain_db.commit(txn).is_ok());
+    assert!(bob_node
+        .blockchain_db
+        .add_kernels(vec![kernel1.clone(), kernel2.clone()])
+        .is_ok());
+    assert!(carol_node
+        .blockchain_db
+        .add_kernels(vec![kernel1.clone(), kernel2.clone()])
+        .is_ok());
 
     runtime.block_on(async {
         let received_kernels = alice_node
@@ -236,14 +236,14 @@ fn request_and_response_fetch_utxos() {
     let hash1 = utxo1.hash();
     let hash2 = utxo2.hash();
 
-    let mut txn = DbTransaction::new();
-    txn.insert_utxo(utxo1.clone());
-    txn.insert_utxo(utxo2.clone());
-    assert!(bob_node.blockchain_db.commit(txn).is_ok());
-    let mut txn = DbTransaction::new();
-    txn.insert_utxo(utxo1.clone());
-    txn.insert_utxo(utxo2.clone());
-    assert!(carol_node.blockchain_db.commit(txn).is_ok());
+    assert!(bob_node
+        .blockchain_db
+        .insert_utxos(vec![utxo1.clone(), utxo2.clone()])
+        .is_ok());
+    assert!(carol_node
+        .blockchain_db
+        .insert_utxos(vec![utxo1.clone(), utxo2.clone()])
+        .is_ok());
 
     runtime.block_on(async {
         let received_utxos = alice_node.outbound_nci.fetch_utxos(vec![hash1.clone()]).await.unwrap();
@@ -794,22 +794,15 @@ fn request_and_response_fetch_mmr_node_and_count() {
 
     let mut blocks = vec![block0];
     let db = &mut bob_node.blockchain_db;
-    let mut txn = DbTransaction::new();
-    txn.insert_utxo(utxo1.clone());
-    txn.insert_utxo(utxo2.clone());
     txn.insert_kernel(kernel1.clone());
     assert!(db.commit(txn).is_ok());
     generate_block(db, &mut blocks, vec![], &consensus_manager.consensus_constants()).unwrap();
 
-    let mut txn = DbTransaction::new();
-    txn.insert_utxo(utxo3.clone());
     txn.spend_utxo(utxo_hash1.clone());
     txn.insert_kernel(kernel2.clone());
     assert!(db.commit(txn).is_ok());
     generate_block(db, &mut blocks, vec![], &consensus_manager.consensus_constants()).unwrap();
 
-    let mut txn = DbTransaction::new();
-    txn.insert_utxo(utxo4.clone());
     txn.spend_utxo(utxo_hash3.clone());
     txn.insert_kernel(kernel3.clone());
     assert!(db.commit(txn).is_ok());

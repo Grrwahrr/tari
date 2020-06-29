@@ -488,6 +488,32 @@ where D: Digest + Send + Sync
                 return Err(ChainStorageError::UnspendableInput);
             }
         }
+        // lets update the checkpoints of and the mmrs
+        // kernels
+        let curr_checkpoint = db.curr_kernel_checkpoint.clone();
+        db.kernel_checkpoints.push(curr_checkpoint)?;
+        db.curr_kernel_checkpoint.reset();
+
+        db.kernel_mmr
+            .update()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        // utxos
+        let curr_checkpoint = db.curr_utxo_checkpoint.clone();
+        db.utxo_checkpoints.push(curr_checkpoint)?;
+        db.curr_utxo_checkpoint.reset();
+
+        db.utxo_mmr
+            .update()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+
+        // range proofs
+        let curr_checkpoint = db.curr_range_proof_checkpoint.clone();
+        db.range_proof_checkpoints.push(curr_checkpoint)?;
+        db.curr_range_proof_checkpoint.reset();
+
+        db.range_proof_mmr
+            .update()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
 
         Ok(())
     }
@@ -771,12 +797,26 @@ where D: Digest + Send + Sync
         height: u64,
     ) -> Result<Vec<BlockHeader>, ChainStorageError>
     {
-        unimplemented!()
+        let db = self.db_access()?;
+        let mut headers = Vec::new();
+
+        for (_, block) in db.orphans.iter() {
+            if (block.header.prev_hash == hash) && (block.header.height == height + 1) {
+                // we found a match, let save to call later
+                headers.push(block.header.clone());
+            }
+        }
+        Ok(headers)
     }
 
     /// Returns a list of all orphan block headers
     fn fetch_all_orphan_headers(&self) -> Result<Vec<BlockHeader>, ChainStorageError> {
-        unimplemented!()
+        let db = self.db_access()?;
+        let mut headers = Vec::new();
+        for (_, val) in db.orphans.iter() {
+            headers.push(val.header.clone());
+        }
+        Ok(headers)
     }
 
     fn fetch_mmr_leaf_index(&self, tree: MmrTree, hash: &Hash) -> Result<Option<u32>, ChainStorageError> {

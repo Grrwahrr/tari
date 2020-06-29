@@ -92,9 +92,7 @@ fn insert_and_fetch_kernel() {
     let kernel = create_test_kernel(5.into(), 0);
     let hash = kernel.hash();
 
-    let mut txn = DbTransaction::new();
-    txn.insert_kernel(kernel.clone());
-    assert!(store.commit(txn).is_ok());
+    assert!(store.add_kernels(vec![kernel]).is_ok());
     assert_eq!(store.fetch_kernel(hash), Ok(kernel));
 }
 
@@ -117,7 +115,7 @@ fn insert_and_fetch_header() {
     let mut header = BlockHeader::new(0);
     header.height = 42;
 
-    assert!(store.add_headers(vec![header]).is_ok());
+    assert!(store.add_block_headers(vec![header]).is_ok());
     assert!(store.fetch_header(0).is_ok());
     assert_eq!(
         store.fetch_header(1),
@@ -135,9 +133,7 @@ fn insert_and_fetch_utxo() {
     let (utxo, _) = create_utxo(MicroTari(10_000), &factories, None);
     let hash = utxo.hash();
     assert_eq!(store.is_utxo(hash.clone()).unwrap(), false);
-    let mut txn = DbTransaction::new();
-    txn.insert_utxo(utxo.clone());
-    assert!(store.commit(txn).is_ok());
+    assert!(store.add_utxos(vec![utxo.clone()]).is_ok());
     assert_eq!(store.is_utxo(hash.clone()).unwrap(), true);
     assert_eq!(store.fetch_utxo(hash), Ok(utxo));
 }
@@ -167,7 +163,7 @@ fn multiple_threads() {
     let a = thread::spawn(move || {
         let kernel = create_test_kernel(5.into(), 0);
         let hash = kernel.hash();
-        assert!(store_a.add_kernel(kernel.clone().is_ok()));
+        assert!(store_a.add_kernels(vec![kernel.clone()]).is_ok());
         hash
     });
     // Save a kernel in thread B
@@ -175,7 +171,7 @@ fn multiple_threads() {
     let b = thread::spawn(move || {
         let kernel = create_test_kernel(10.into(), 0);
         let hash = kernel.hash();
-        assert!(store_b.add_kernel(kernel.clone().is_ok()));
+        assert!(store_b.add_kernels(vec![kernel.clone()]).is_ok());
         hash
     });
     let hash_a = a.join().unwrap();
@@ -187,138 +183,160 @@ fn multiple_threads() {
     assert_eq!(kernel_b.fee, 10.into());
 }
 
-// #[test]
-// fn utxo_and_rp_merkle_root() {
-//     let network = Network::LocalNet;
-//     let gen_block = genesis_block::get_rincewind_genesis_block_raw();
-//     let consensus_manager = ConsensusManagerBuilder::new(network).with_block(gen_block).build();
-//     let store = create_mem_db(&consensus_manager);
-//     let factories = CryptoFactories::default();
-//     let block0 = store.fetch_block_with_height(0).unwrap().block().clone();
+#[test]
+fn utxo_and_rp_merkle_root() {
+    let network = Network::LocalNet;
+    let gen_block = genesis_block::get_rincewind_genesis_block_raw();
+    let consensus_manager = ConsensusManagerBuilder::new(network).with_block(gen_block).build();
+    let store = create_mem_db(&consensus_manager);
+    let factories = CryptoFactories::default();
+    let block0 = store.fetch_block_with_height(0).unwrap().block().clone();
 
-//     let utxo0 = block0.body.outputs()[0].clone();
-//     let (utxo1, _) = create_utxo(MicroTari(10_000), &factories, None);
-//     let (utxo2, _) = create_utxo(MicroTari(10_000), &factories, None);
-//     let hash0 = utxo0.hash();
-//     let hash1 = utxo1.hash();
-//     let hash2 = utxo2.hash();
-//     // Calculate the Range proof MMR root as a check
-//     let mut rp_mmr_check = MutableMmr::<HashDigest, _>::new(Vec::new(), Bitmap::create());
-//     assert_eq!(rp_mmr_check.push(&utxo0.proof.hash()).unwrap(), 1);
-//     assert_eq!(rp_mmr_check.push(&utxo1.proof.hash()).unwrap(), 2);
-//     assert_eq!(rp_mmr_check.push(&utxo2.proof.hash()).unwrap(), 3);
-//     // Store the UTXOs
-//     let mut txn = DbTransaction::new();
-//     txn.insert_utxo(utxo1);
-//     txn.insert_utxo(utxo2);
-//     assert!(store.commit(txn).is_ok());
-//     let root = store.calculate_mmr_root(MmrTree::Utxo, vec![],vec![]).unwrap();
-//     let rp_root = store.calculate_mmr_root(MmrTree::RangeProof, vec![],vec![]).unwrap();
-//     let mut mmr_check = MutableMmr::<HashDigest, _>::new(Vec::new(), Bitmap::create());
-//     assert!(mmr_check.push(&hash0).is_ok());
-//     assert!(mmr_check.push(&hash1).is_ok());
-//     assert!(mmr_check.push(&hash2).is_ok());
-//     assert_eq!(root.to_hex(), mmr_check.get_merkle_root().unwrap().to_hex());
-//     assert_eq!(rp_root.to_hex(), rp_mmr_check.get_merkle_root().unwrap().to_hex());
-// }
+    let utxo0 = block0.body.outputs()[0].clone();
+    let (utxo1, _) = create_utxo(MicroTari(10_000), &factories, None);
+    let (utxo2, _) = create_utxo(MicroTari(10_000), &factories, None);
+    let hash0 = utxo0.hash();
+    let hash1 = utxo1.hash();
+    let hash2 = utxo2.hash();
+    // Calculate the Range proof MMR root as a check
+    let mut rp_mmr_check = MutableMmr::<HashDigest, _>::new(Vec::new(), Bitmap::create());
+    assert_eq!(rp_mmr_check.push(&utxo0.proof.hash()).unwrap(), 1);
+    assert_eq!(rp_mmr_check.push(&utxo1.proof.hash()).unwrap(), 2);
+    assert_eq!(rp_mmr_check.push(&utxo2.proof.hash()).unwrap(), 3);
+    // Store the UTXOs
+    let mut txn = DbTransaction::new();
+    txn.insert_utxo(utxo1);
+    txn.insert_utxo(utxo2);
+    assert!(store.commit(txn).is_ok());
+    let root = store.calculate_mmr_root(MmrTree::Utxo, vec![], vec![]).unwrap();
+    let rp_root = store.calculate_mmr_root(MmrTree::RangeProof, vec![], vec![]).unwrap();
+    let mut mmr_check = MutableMmr::<HashDigest, _>::new(Vec::new(), Bitmap::create());
+    assert!(mmr_check.push(&hash0).is_ok());
+    assert!(mmr_check.push(&hash1).is_ok());
+    assert!(mmr_check.push(&hash2).is_ok());
+    assert_eq!(root.to_hex(), mmr_check.get_merkle_root().unwrap().to_hex());
+    assert_eq!(rp_root.to_hex(), rp_mmr_check.get_merkle_root().unwrap().to_hex());
+}
 
-// #[test]
-// fn kernel_merkle_root() {
-//     let network = Network::LocalNet;
-//     let consensus_manager = ConsensusManagerBuilder::new(network).build();
-//     let store = create_mem_db(&consensus_manager);
-//     let block0 = store.fetch_block_with_height(0).unwrap().block().clone();
+#[test]
+fn kernel_merkle_root() {
+    let network = Network::LocalNet;
+    let consensus_manager = ConsensusManagerBuilder::new(network).build();
+    let store = create_mem_db(&consensus_manager);
+    let block0 = store.fetch_block_with_height(0).unwrap().block().clone();
 
-//     let kernel1 = create_test_kernel(100.into(), 0);
-//     let kernel2 = create_test_kernel(200.into(), 0);
-//     let kernel3 = create_test_kernel(300.into(), 0);
-//     let hash0 = block0.body.kernels()[0].hash();
-//     let hash1 = kernel1.hash();
-//     let hash2 = kernel2.hash();
-//     let hash3 = kernel3.hash();
-//     let mut txn = DbTransaction::new();
-//     txn.insert_kernel(kernel1);
-//     txn.insert_kernel(kernel2);
-//     txn.insert_kernel(kernel3);
-//     assert!(store.commit(txn).is_ok());
-//     let root = store.calculate_mmr_root(MmrTree::Kernel, vec![],vec![]).unwrap();
-//     let mut mmr_check = MutableMmr::<HashDigest, _>::new(Vec::new(), Bitmap::create());
-//     assert!(mmr_check.push(&hash0).is_ok());
-//     assert!(mmr_check.push(&hash1).is_ok());
-//     assert!(mmr_check.push(&hash2).is_ok());
-//     assert!(mmr_check.push(&hash3).is_ok());
-//     assert_eq!(root.to_hex(), mmr_check.get_merkle_root().unwrap().to_hex());
-// }
+    let kernel1 = create_test_kernel(100.into(), 0);
+    let kernel2 = create_test_kernel(200.into(), 0);
+    let kernel3 = create_test_kernel(300.into(), 0);
+    let hash0 = block0.body.kernels()[0].hash();
+    let hash1 = kernel1.hash();
+    let hash2 = kernel2.hash();
+    let hash3 = kernel3.hash();
+    assert!(store.add_kernels(vec![kernel1, kernel2, kernel3]).is_ok());
+    let root = store.calculate_mmr_root(MmrTree::Kernel, vec![], vec![]).unwrap();
+    let mut mmr_check = MutableMmr::<HashDigest, _>::new(Vec::new(), Bitmap::create());
+    assert!(mmr_check.push(&hash0).is_ok());
+    assert!(mmr_check.push(&hash1).is_ok());
+    assert!(mmr_check.push(&hash2).is_ok());
+    assert!(mmr_check.push(&hash3).is_ok());
+    assert_eq!(root.to_hex(), mmr_check.get_merkle_root().unwrap().to_hex());
+}
 
-// #[test]
-// fn utxo_and_rp_future_merkle_root() {
-//     let network = Network::LocalNet;
-//     let gen_block = genesis_block::get_rincewind_genesis_block_raw();
-//     let consensus_manager = ConsensusManagerBuilder::new(network).with_block(gen_block).build();
-//     let store = create_mem_db(&consensus_manager);
-//     let factories = CryptoFactories::default();
+#[test]
+fn utxo_and_rp_future_merkle_root() {
+    let network = Network::LocalNet;
+    let gen_block = genesis_block::get_rincewind_genesis_block_raw();
+    let consensus_manager = ConsensusManagerBuilder::new(network).with_block(gen_block).build();
+    let store = create_mem_db(&consensus_manager);
+    let factories = CryptoFactories::default();
 
-//     let (utxo1, _) = create_utxo(MicroTari(10_000), &factories, None);
-//     let (utxo2, _) = create_utxo(MicroTari(15_000), &factories, None);
-//     let utxo_hash2 = utxo2.hash();
-//     let rp_hash2 = utxo2.proof.hash();
+    let (utxo1, _) = create_utxo(MicroTari(10_000), &factories, None);
+    let (utxo2, _) = create_utxo(MicroTari(15_000), &factories, None);
+    let utxo_hash2 = utxo2.hash();
+    let rp_hash2 = utxo2.proof.hash();
 
-//     let mut txn = DbTransaction::new();
-//     txn.insert_utxo(utxo1);
-//     assert!(store.commit(txn).is_ok());
+    let mut txn = DbTransaction::new();
+    txn.insert_utxo(utxo1);
+    assert!(store.commit(txn).is_ok());
 
-//     let utxo_future_root = store
-//         .calculate_mmr_root(MmrTree::Utxo, vec![utxo_hash2], Vec::new())
-//         .unwrap()
-//         .to_hex();
-//     let rp_future_root = store
-//         .calculate_mmr_root(MmrTree::RangeProof, vec![rp_hash2], Vec::new())
-//         .unwrap()
-//         .to_hex();
-//     assert_ne!(utxo_future_root, store.calculate_mmr_root(MmrTree::Utxo, vec![],vec![]).unwrap().to_hex());
-//     assert_ne!(
-//         rp_future_root,
-//         store.calculate_mmr_root(MmrTree::RangeProof, vec![],vec![]).unwrap().to_hex()
-//     );
+    let utxo_future_root = store
+        .calculate_mmr_root(MmrTree::Utxo, vec![utxo_hash2], Vec::new())
+        .unwrap()
+        .to_hex();
+    let rp_future_root = store
+        .calculate_mmr_root(MmrTree::RangeProof, vec![rp_hash2], Vec::new())
+        .unwrap()
+        .to_hex();
+    assert_ne!(
+        utxo_future_root,
+        store
+            .calculate_mmr_root(MmrTree::Utxo, vec![], vec![])
+            .unwrap()
+            .to_hex()
+    );
+    assert_ne!(
+        rp_future_root,
+        store
+            .calculate_mmr_root(MmrTree::RangeProof, vec![], vec![])
+            .unwrap()
+            .to_hex()
+    );
 
-//     let mut txn = DbTransaction::new();
-//     txn.insert_utxo(utxo2);
-//     assert!(store.commit(txn).is_ok());
+    let mut txn = DbTransaction::new();
+    txn.insert_utxo(utxo2);
+    assert!(store.commit(txn).is_ok());
 
-//     assert_eq!(utxo_future_root, store.calculate_mmr_root(MmrTree::Utxo, vec![],vec![]).unwrap().to_hex());
-//     assert_eq!(
-//         rp_future_root,
-//         store.calculate_mmr_root(MmrTree::RangeProof, vec![],vec![]).unwrap().to_hex()
-//     );
-// }
+    assert_eq!(
+        utxo_future_root,
+        store
+            .calculate_mmr_root(MmrTree::Utxo, vec![], vec![])
+            .unwrap()
+            .to_hex()
+    );
+    assert_eq!(
+        rp_future_root,
+        store
+            .calculate_mmr_root(MmrTree::RangeProof, vec![], vec![])
+            .unwrap()
+            .to_hex()
+    );
+}
 
-// #[test]
-// fn kernel_future_merkle_root() {
-//     let network = Network::LocalNet;
-//     let gen_block = genesis_block::get_rincewind_genesis_block_raw();
-//     let consensus_manager = ConsensusManagerBuilder::new(network).with_block(gen_block).build();
-//     let store = create_mem_db(&consensus_manager);
+#[test]
+fn kernel_future_merkle_root() {
+    let network = Network::LocalNet;
+    let gen_block = genesis_block::get_rincewind_genesis_block_raw();
+    let consensus_manager = ConsensusManagerBuilder::new(network).with_block(gen_block).build();
+    let store = create_mem_db(&consensus_manager);
 
-//     let kernel1 = create_test_kernel(100.into(), 0);
-//     let kernel2 = create_test_kernel(200.into(), 0);
-//     let hash2 = kernel2.hash();
+    let kernel1 = create_test_kernel(100.into(), 0);
+    let kernel2 = create_test_kernel(200.into(), 0);
+    let hash2 = kernel2.hash();
 
-//     let mut txn = DbTransaction::new();
-//     txn.insert_kernel(kernel1);
-//     assert!(store.commit(txn).is_ok());
+    assert!(store.add_kernels(vec![kernel1]).is_ok());
 
-//     let future_root = store
-//         .calculate_mmr_root(MmrTree::Kernel, vec![hash2], Vec::new())
-//         .unwrap()
-//         .to_hex();
-//     assert_ne!(future_root, store.calculate_mmr_root(MmrTree::Kernel, vec![],vec![]).unwrap().to_hex());
+    let future_root = store
+        .calculate_mmr_root(MmrTree::Kernel, vec![hash2], Vec::new())
+        .unwrap()
+        .to_hex();
+    assert_ne!(
+        future_root,
+        store
+            .calculate_mmr_root(MmrTree::Kernel, vec![], vec![])
+            .unwrap()
+            .to_hex()
+    );
 
-//     let mut txn = DbTransaction::new();
-//     txn.insert_kernel(kernel2);
-//     assert!(store.commit(txn).is_ok());
+    assert!(store.add_kernels(vec![kernel2]).is_ok());
 
-//     assert_eq!(future_root, store.calculate_mmr_root(MmrTree::Kernel, vec![],vec![]).unwrap().to_hex());
-// }
+    assert_eq!(
+        future_root,
+        store
+            .calculate_mmr_root(MmrTree::Kernel, vec![], vec![])
+            .unwrap()
+            .to_hex()
+    );
+}
 
 // #[test]
 // fn utxo_and_rp_mmr_proof() {
@@ -358,11 +376,7 @@ fn multiple_threads() {
 //     let kernel1 = create_test_kernel(100.into(), 0);
 //     let kernel2 = create_test_kernel(200.into(), 1);
 //     let kernel3 = create_test_kernel(300.into(), 2);
-//     let mut txn = DbTransaction::new();
-//     txn.insert_kernel(kernel1.clone());
-//     txn.insert_kernel(kernel2.clone());
-//     txn.insert_kernel(kernel3.clone());
-//     assert!(store.commit(txn).is_ok());
+//     assert!(store.add_kernels(vec![kernel1.clone(), kernel2.clone(), kernel3.clone()]).is_ok());
 
 //     let root = store.fetch_mmr_only_root(MmrTree::Kernel).unwrap();
 //     let proof1 = store.fetch_mmr_proof(MmrTree::Kernel, 1).unwrap();

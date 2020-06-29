@@ -599,25 +599,25 @@ where T: BlockchainBackend
     }
 
     /// This is used when synchronising. Adds in the list of headers provided to the main chain
-    pub fn add_block_headers(&mut self, headers: Vec<BlockHeader>) -> Result<(), ChainStorageError> {
+    pub fn add_block_headers(&self, headers: Vec<BlockHeader>) -> Result<(), ChainStorageError> {
         let mut db = self.db_write_access()?;
         db.add_block_headers(headers)
     }
 
     /// This is used when synchronising. Adds in the list of kernels provided to the main chain
-    pub fn add_kernels(&mut self, kernels: Vec<TransactionKernel>) -> Result<(), ChainStorageError> {
+    pub fn add_kernels(&self, kernels: Vec<TransactionKernel>) -> Result<(), ChainStorageError> {
         let mut db = self.db_write_access()?;
         db.add_kernels(kernels)
     }
 
     /// This is used when synchronising. Adds in the list of utxos provided to the main chain
-    pub fn add_utxos(&mut self, utxos: Vec<TransactionOutput>) -> Result<(), ChainStorageError> {
+    pub fn add_utxos(&self, utxos: Vec<TransactionOutput>) -> Result<(), ChainStorageError> {
         let mut db = self.db_write_access()?;
         db.add_utxos(utxos)
     }
 
     /// This is used when synchronising. Adds in the list of utxos provided to the main chain
-    pub fn add_orphan_block(&mut self, orphan: Block) -> Result<(), ChainStorageError> {
+    pub fn add_orphan_block(&self, orphan: Block) -> Result<(), ChainStorageError> {
         if let Err(e) = self.validators.orphan.validate(&orphan) {
             warn!(
                 target: LOG_TARGET,
@@ -1387,7 +1387,7 @@ fn cleanup_orphans<T: BlockchainBackend>(
             blocks_to_remove.push(block_hash);
             // txn.delete(DbKey::OrphanBlock(block_hash.clone()));
         }
-        db.remove_orphan_blocks(blocks_to_remove);
+        db.remove_orphan_blocks(blocks_to_remove)?;
         // commit(db, txn)?;
     }
     Ok(())

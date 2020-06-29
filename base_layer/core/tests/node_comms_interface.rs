@@ -170,7 +170,7 @@ fn inbound_fetch_kernels() {
 
     let kernel = create_test_kernel(5.into(), 0);
     let hash = kernel.hash();
-    assert!(store.add_kernels(kernel.clone()).is_ok());
+    assert!(store.add_kernels(vec![kernel.clone()]).is_ok());
     test_async(move |rt| {
         rt.spawn(async move {
             if let Ok(NodeCommsResponse::TransactionKernels(received_kernels)) = inbound_nch
@@ -286,7 +286,7 @@ fn inbound_fetch_utxos() {
 
     let (utxo, _) = create_utxo(MicroTari(10_000), &factories, None);
     let hash = utxo.hash();
-    assert!(store.add_utxos(vec![utxo]).is_ok());
+    assert!(store.add_utxos(vec![utxo.clone()]).is_ok());
 
     test_async(move |rt| {
         rt.spawn(async move {

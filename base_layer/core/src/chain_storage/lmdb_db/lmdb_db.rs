@@ -476,6 +476,38 @@ where D: Digest + Send + Sync
             pruning_horizon: fetch_pruning_horizon(&self.env, &self.metadata_db)?,
             accumulated_difficulty: fetch_accumulated_work(&self.env, &self.metadata_db)?,
         };
+        // let update the mmrs
+        // kernels
+        let curr_checkpoint = self.curr_kernel_checkpoint.clone();
+        self.kernel_checkpoints
+            .push(curr_checkpoint)
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        self.curr_kernel_checkpoint.reset();
+
+        self.kernel_mmr
+            .update()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        // utxos
+        let curr_checkpoint = self.curr_utxo_checkpoint.clone();
+        self.utxo_checkpoints
+            .push(curr_checkpoint)
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        self.curr_utxo_checkpoint.reset();
+
+        self.utxo_mmr
+            .update()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        // rangeproofs
+        let curr_checkpoint = self.curr_range_proof_checkpoint.clone();
+        self.range_proof_checkpoints
+            .push(curr_checkpoint)
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+        self.curr_range_proof_checkpoint.reset();
+
+        self.range_proof_mmr
+            .update()
+            .map_err(|e| ChainStorageError::AccessError(e.to_string()))?;
+
         Ok(())
     }
 
@@ -814,7 +846,7 @@ where D: Digest + Send + Sync
                 // we found a match, let save to call later
                 headers.push(block.header);
             }
-        });
+        })?;
         Ok(headers)
     }
 
@@ -825,7 +857,7 @@ where D: Digest + Send + Sync
             let (_, block) = pair.unwrap();
             // we found a match, let save to call later
             headers.push(block.header);
-        });
+        })?;
         Ok(headers)
     }
 
